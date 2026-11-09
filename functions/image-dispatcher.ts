@@ -10,7 +10,7 @@ const snsClient = new SNSClient({});
 const tableName = process.env.TABLE_NAME;
 const topicArn = process.env.TOPIC_ARN;
 
-export const lambdaHandler = async (event: S3Event): Promise<void> => {
+export const handler =async (event: S3Event): Promise<void> => {
     // This log helps you see the raw data coming from S3
     console.log("EVENT RECEIVED:", JSON.stringify(event, null, 2));
 

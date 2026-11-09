@@ -1,8 +1,8 @@
 {
-  "name": "image_logger",
+  "name": "media-processor-functions",
   "version": "1.0.0",
-  "description": "image logger for S3 to DynamoDB",
-  "main": "app.js",
+  "description": "Lambda functions for the media processor: upload URLs, dispatching and image analysis",
+  "private": true,
   "repository": "https://github.com/awslabs/aws-sam-cli/tree/develop/samcli/local/init/templates/cookiecutter-aws-sam-hello-nodejs",
   "author": "SAM CLI",
   "license": "MIT",
@@ -19,7 +19,7 @@
     "@aws-sdk/client-sns": "^3.964.0",
     "@aws-sdk/lib-dynamodb": "^3.954.0",
     "@aws-sdk/s3-request-presigner": "^3.964.0",
-    "esbuild": "^0.14.14",
+    "esbuild": "^0.28.2",
     "uuid": "^13.0.0"
   },
   "devDependencies": {
@@ -29,6 +29,7 @@
     "@types/node": "^20.5.7",
     "@typescript-eslint/eslint-plugin": "^5.10.2",
     "@typescript-eslint/parser": "^5.10.2",
+    "aws-sdk-client-mock": "^4.1.0",
     "eslint": "^8.8.0",
     "eslint-config-prettier": "^8.3.0",
     "eslint-plugin-prettier": "^4.0.0",
