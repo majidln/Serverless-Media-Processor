@@ -13,7 +13,7 @@ Out of scope: frontend, Bedrock or other new AI features, Step Functions, Powert
 | Step | What | Status | Tag | Cost at rest |
 |---|---|---|---|---|
 | 0 | Baseline and a working test setup | Done | `step-0-complete` | Free |
-| 1 | Failures stop being silent | Not started | `step-1-complete` | Free |
+| 1 | Failures stop being silent | Done | `step-1-complete` | Free |
 | 2 | Safe uploads and unique keys | Not started | `step-2-complete` | Free |
 | 3 | Queues between SNS and the consumers | Not started | `step-3-complete` | Free |
 | 4 | Image resizer | Not started | `step-4-complete` | S3 storage only, cents |
@@ -146,10 +146,12 @@ Rethrow errors (or collect failures and throw at the end). Make the dispatcher's
 **The point: a failure must be visible and retryable, never disguised as success.**
 
 **Exit:**
-- [ ] A forced Rekognition error fails the invocation (unit test and one live check).
-- [ ] A repeated S3 event leaves the item unchanged.
-- [ ] The analyzer never creates an item that doesn't exist.
-- [ ] The stored item uses the `analysis` map from §3.
+- [x] A forced Rekognition error fails the invocation. *(unit test; the live check waits for the first deploy in Step 3)*
+- [x] A repeated S3 event leaves the item unchanged. *(the write is conditional; a duplicate is ignored once the analysis has finished)*
+- [x] The analyzer never creates an item that doesn't exist. *(`attribute_exists(id)`; a missing item fails the invocation)*
+- [x] The stored item uses the `analysis` map from §3. *(`PENDING` from the dispatcher, then `COMPLETE` with labels or `FAILED` with an error name; the top-level `status` is gone)*
+
+*Notes: two choices go slightly beyond the plan. When the conditional write fails, the dispatcher reads the item, and publishes again only if `analysis.status` is still `PENDING`. Without that, a retry after a failed publish would see "already exists" and the event would be lost. And an image Rekognition can never read (`InvalidImageFormatException`, `ImageTooLargeException`) is recorded as `analysis.status = FAILED` instead of being retried, since retrying can't help. Everything else, including a malformed message, fails the invocation. Until Step 3 adds the queue and DLQ, SNS retries a failed delivery a few times and then drops it.*
 
 *Free.*
 
@@ -198,7 +200,7 @@ Start with a spike: a Hello-world `sharp` function that builds with `sam build` 
 *S3 storage for the variants only. Cents.*
 
 ### Step 5: The docs describe V5
-The README calls the dispatcher the wrong name in places, says `PENDING` where the code writes `INITIALIZED`, has a typo in the project tree, and says nothing about how to get a token and call `/upload`.
+The README calls the dispatcher the wrong name in places, had a typo in the project tree, and says nothing about how to get a token and call `/upload`.
 
 Update the README for V6: architecture, project tree, status values, a short "get a token and upload" walkthrough with `curl`, local testing for the new functions, and clean-up for both buckets. Update the diagram (a Mermaid version is fine; the `Media-Processor-V6` image is redrawn by hand). Tag `v6-complete`.
 
