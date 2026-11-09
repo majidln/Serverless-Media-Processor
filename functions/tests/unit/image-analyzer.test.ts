@@ -1,6 +1,12 @@
 import { SNSEvent } from 'aws-lambda';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { DetectLabelsCommand, RekognitionClient } from '@aws-sdk/client-rekognition';
+import {
+    DetectLabelsCommand,
+    InvalidImageFormatException,
+    RekognitionClient,
+    ThrottlingException,
+} from '@aws-sdk/client-rekognition';
 import { mockClient } from 'aws-sdk-client-mock';
 import { beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { handler } from '../../image-analyzer';
@@ -21,7 +27,7 @@ describe('analyzer (image-analyzer.ts)', () => {
         jest.spyOn(console, 'error').mockImplementation(() => undefined);
     });
 
-    it('detects labels and stores them on the item', async () => {
+    it('detects labels and stores them in the analysis attribute', async () => {
         rekogMock.on(DetectLabelsCommand).resolves({ Labels: [{ Name: 'Dog' }, { Name: 'Grass' }] });
         ddbMock.on(UpdateCommand).resolves({});
 
@@ -35,9 +41,11 @@ describe('analyzer (image-analyzer.ts)', () => {
         const update = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
         expect(update.TableName).toBe('test-table');
         expect(update.Key).toEqual({ id: 'photo.jpg' });
-        expect(update.ExpressionAttributeValues).toMatchObject({
-            ':l': ['Dog', 'Grass'],
-            ':status': 'ANALYSIS_COMPLETE',
+        expect(update.UpdateExpression).toBe('SET analysis = :a');
+        expect(update.ConditionExpression).toBe('attribute_exists(id)');
+        expect(update.ExpressionAttributeValues?.[':a']).toMatchObject({
+            status: 'COMPLETE',
+            labels: ['Dog', 'Grass'],
         });
     });
 
@@ -48,19 +56,44 @@ describe('analyzer (image-analyzer.ts)', () => {
         await handler(snsEvent(uploaded));
 
         const update = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
-        expect(update.ExpressionAttributeValues?.[':l']).toEqual([]);
+        expect(update.ExpressionAttributeValues?.[':a']).toMatchObject({ status: 'COMPLETE', labels: [] });
     });
 
-    // Current behavior: errors are swallowed, so Lambda reports success. Step 1 changes this.
-    it('does not update the item when Rekognition fails, and resolves anyway', async () => {
-        rekogMock.on(DetectLabelsCommand).rejects(new Error('unsupported image'));
+    it('fails the invocation on a transient Rekognition error, and leaves the item alone', async () => {
+        rekogMock.on(DetectLabelsCommand).rejects(
+            new ThrottlingException({ message: 'slow down', $metadata: {} }),
+        );
 
-        await expect(handler(snsEvent(uploaded))).resolves.toBeUndefined();
+        await expect(handler(snsEvent(uploaded))).rejects.toThrow('slow down');
         expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
     });
 
-    it('skips a malformed message without calling AWS', async () => {
-        await expect(handler(snsEvent('not json'))).resolves.toBeUndefined();
+    it('records FAILED instead of retrying an image Rekognition can never read', async () => {
+        rekogMock.on(DetectLabelsCommand).rejects(
+            new InvalidImageFormatException({ message: 'bad format', $metadata: {} }),
+        );
+        ddbMock.on(UpdateCommand).resolves({});
+
+        await expect(handler(snsEvent(uploaded))).resolves.toBeUndefined();
+
+        const update = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+        expect(update.ExpressionAttributeValues?.[':a']).toMatchObject({
+            status: 'FAILED',
+            error: 'InvalidImageFormatException',
+        });
+    });
+
+    it('fails the invocation when the item does not exist', async () => {
+        rekogMock.on(DetectLabelsCommand).resolves({ Labels: [{ Name: 'Dog' }] });
+        ddbMock.on(UpdateCommand).rejects(
+            new ConditionalCheckFailedException({ message: 'no item', $metadata: {} }),
+        );
+
+        await expect(handler(snsEvent(uploaded))).rejects.toThrow('no item');
+    });
+
+    it('fails the invocation on a malformed message, without calling AWS', async () => {
+        await expect(handler(snsEvent('not json'))).rejects.toThrow();
         expect(rekogMock.commandCalls(DetectLabelsCommand)).toHaveLength(0);
         expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
     });

@@ -16,7 +16,7 @@ The application follows a simple serverless architecture:
 1.  **Amazon Cognito (User Pool + App Client)**: Handles user authentication and issues JWT access tokens..
 2.  **API Gateway (HTTP API)**: A high-performance endpoint for requesting **S3 Presigned URLs**.
 3.  **S3 Bucket**: Receives the binary image data from the client.
-4.  **Dispatcher Lambda**: Triggered by S3 `ObjectCreated`. It writes an initial "INITIALIZED" record to DynamoDB and publishes a message to the **SNS Topic**.
+4.  **Dispatcher Lambda**: Triggered by S3 `ObjectCreated`. It writes an initial record to DynamoDB (`analysis.status = PENDING`) and publishes a message to the **SNS Topic**.
 5.  **Amazon SNS (Image Events Topic)**: Acts as the message hub, broadcasting the image location to all "listeners."
 6.  **AI Analyzer Lambda**: An SNS subscriber that receives the message, calls **Amazon Rekognition** for labels, and updates the DynamoDB record.
 7.  **Amazon DynamoDB**: The source of truth for metadata, storing everything from file size to AI-generated tags.
