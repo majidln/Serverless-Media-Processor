@@ -16,7 +16,7 @@ The application follows a simple serverless architecture:
 1.  **Amazon Cognito (User Pool + App Client)**: Handles user authentication and issues JWT access tokens..
 2.  **API Gateway (HTTP API)**: A high-performance endpoint for requesting **S3 Presigned URLs**.
 3.  **S3 Bucket**: Receives the binary image data from the client.
-4.  **Dispatcher Lambda**: Triggered by S3 `ObjectCreated`. It writes an initial "PENDING" record to DynamoDB and publishes a message to the **SNS Topic**.
+4.  **Dispatcher Lambda**: Triggered by S3 `ObjectCreated`. It writes an initial "INITIALIZED" record to DynamoDB and publishes a message to the **SNS Topic**.
 5.  **Amazon SNS (Image Events Topic)**: Acts as the message hub, broadcasting the image location to all "listeners."
 6.  **AI Analyzer Lambda**: An SNS subscriber that receives the message, calls **Amazon Rekognition** for labels, and updates the DynamoDB record.
 7.  **Amazon DynamoDB**: The source of truth for metadata, storing everything from file size to AI-generated tags.
@@ -25,11 +25,12 @@ The application follows a simple serverless architecture:
 
 ```
 .
-├── image-logger/           # Lambda function source code
-│   ├── app.ts              # Initial DB log & SNS Broadcast
-│   ├── get-url.ts          # Get url for upload to S3 
-│   ├── image-analzer.ts    # SNS Subsciber for AI Analysis
-│   └── package.json        # Dependencies (AWS SDK v3)
+├── functions/                  # Lambda function source code
+│   ├── get-upload-url.ts       # Get a presigned URL for upload to S3
+│   ├── image-dispatcher.ts     # Initial DB log & SNS broadcast
+│   ├── image-analyzer.ts       # SNS subscriber for AI analysis
+│   ├── tests/unit/             # Unit tests (aws-sdk-client-mock)
+│   └── package.json            # Dependencies (AWS SDK v3)
 ├── events/                 # Mock events for local testing
 │   └── s3-event.json       # Generated S3 Put event
 ├── template.yaml           # SAM template (Infrastructure as Code)
@@ -55,7 +56,7 @@ The application follows a simple serverless architecture:
 Install dependencies for the Lambda function:
 
 ```bash
-cd image-logger
+cd functions
 npm install
 cd ..
 ```
@@ -88,7 +89,7 @@ Create an `env.json` file in the root directory. Replace `YOUR_ACTUAL_TABLE_NAME
 
 ```json
 {
-  "ImageProcessorFunction": {
+  "ImageDispatcherFunction": {
     "TABLE_NAME": "YOUR_ACTUAL_TABLE_NAME"
   }
 }
@@ -99,7 +100,7 @@ Create an `env.json` file in the root directory. Replace `YOUR_ACTUAL_TABLE_NAME
 Run the function using a mock S3 event:
 
 ```bash
-sam local invoke ImageProcessorFunction -e events/s3-event.json --env-vars env.json
+sam local invoke ImageDispatcherFunction -e events/s3-event.json --env-vars env.json
 ```
 
 

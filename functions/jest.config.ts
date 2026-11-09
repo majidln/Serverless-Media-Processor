@@ -11,5 +11,6 @@ export default {
     collectCoverage: true,
     coverageDirectory: 'coverage',
     coverageProvider: 'v8',
+    setupFiles: ['<rootDir>/tests/setup-env.ts'],
     testMatch: ['**/tests/unit/*.test.ts'],
 };

@@ -47,13 +47,13 @@ Resources:
         MaxAge: 3000
       Auth:
         Authorizers:
-          MyCognitoAuthorizer:
+          CognitoJwtAuthorizer:
             IdentitySource: $request.header.Authorization
             JwtConfiguration:
               Issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${AuthCognitoUserPool}"
               Audience:
                 - !Ref AuthCognitoUserPoolClient
-        DefaultAuthorizer: MyCognitoAuthorizer
+        DefaultAuthorizer: CognitoJwtAuthorizer
 
   ImageMetadataTable:
     Type: AWS::Serverless::SimpleTable
@@ -76,8 +76,8 @@ Resources:
   GetUploadUrlFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: image-logger/
-      Handler: get-url.handler
+      CodeUri: functions/
+      Handler: get-upload-url.handler
       Runtime: nodejs20.x
       Architectures: [arm64]
       Environment:
@@ -98,9 +98,11 @@ Resources:
       BuildProperties:
         Minify: true
         Target: "es2020"
+        External:
+          - "@aws-sdk/*"
         Format: "cjs"
         EntryPoints:
-          - get-url.ts
+          - get-upload-url.ts
 
   ImageEventsTopic:
     Type: AWS::SNS::Topic
@@ -121,11 +123,11 @@ Resources:
             Action: sns:Publish
             Resource: !Ref ImageEventsTopic
 
-  ImageProcessorFunction:
+  ImageDispatcherFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: image-logger/
-      Handler: app.lambdaHandler
+      CodeUri: functions/
+      Handler: image-dispatcher.handler
       Runtime: nodejs20.x
       Architectures:
         - arm64
@@ -153,14 +155,16 @@ Resources:
       BuildProperties:
         Minify: true
         Target: "es2020"
+        External:
+          - "@aws-sdk/*"
         Format: "cjs"
         EntryPoints:
-          - app.ts
+          - image-dispatcher.ts
 
   ImageAnalyzerFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: image-logger/
+      CodeUri: functions/
       Handler: image-analyzer.handler
       Runtime: nodejs20.x
       Architectures:
@@ -186,6 +190,8 @@ Resources:
       BuildProperties:
         Minify: true
         Target: "es2020"
+        External:
+          - "@aws-sdk/*"
         Format: "cjs"
         EntryPoints:
           - image-analyzer.ts
