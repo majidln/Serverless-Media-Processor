@@ -14,7 +14,7 @@ Out of scope: frontend, Bedrock or other new AI features, Step Functions, Powert
 |---|---|---|---|---|
 | 0 | Baseline and a working test setup | Done | `step-0-complete` | Free |
 | 1 | Failures stop being silent | Done | `step-1-complete` | Free |
-| 2 | Safe uploads and unique keys | Not started | `step-2-complete` | Free |
+| 2 | Safe uploads and unique keys | Done | `step-2-complete` | Free |
 | 3 | Queues between SNS and the consumers | Not started | `step-3-complete` | Free |
 | 4 | Image resizer | Not started | `step-4-complete` | S3 storage only, cents |
 | 5 | Docs and cleanup | Not started | `v6-complete` | Free |
@@ -161,10 +161,12 @@ The client picks the S3 key, so `photo.jpg` from two users is one object and one
 Generate the key on the server from the user's `sub` and a UUID. Validate `filename`, `contentType` and `size` before signing, and sign `ContentType` and `ContentLength`. Return `400` with a clear message when validation fails, instead of the generic `500`.
 
 **Exit:**
-- [ ] Two uploads named `photo.jpg` produce two objects and two items, each under the caller's `sub` (SC-2).
-- [ ] A wrong type, a wrong extension or an oversized request gets `400`; a PUT that doesn't match the signed type or length is rejected by S3 (SC-3).
-- [ ] The upload bucket's trigger only fires for the `uploads/` prefix.
-- [ ] Unit tests cover valid, invalid, missing-claim and malformed-body cases.
+- [x] Two uploads named `photo.jpg` produce two objects and two items, each under the caller's `sub` (SC-2). *(two calls give two different `uploads/{sub}/{uuid}.jpg` keys; the items follow because the item id is the key; the live check waits for the first deploy)*
+- [x] A wrong type, a wrong extension or an oversized request gets `400`; a PUT that doesn't match the signed type or length is rejected by S3 (SC-3). *(`400` is unit-tested for 13 bad inputs; the signed URL lists `content-length;content-type;host`, checked in a unit test; S3's own rejection is not tried until the first deploy)*
+- [x] The upload bucket's trigger only fires for the `uploads/` prefix. *(S3 `prefix` filter, present in the built template)*
+- [x] Unit tests cover valid, invalid, missing-claim and malformed-body cases. *(41 tests in total, 100% coverage)*
+
+*Notes: the presigner does not sign `content-type` unless it is passed in `signableHeaders`; by default only `content-length` and `host` are signed, so without that option S3 would accept any type. A missing `sub` claim returns `401`. The filename is only validated, never used in the key. The `/upload` request body now needs `filename`, `contentType` and `size`, which breaks clients of V5.*
 
 *Free.*
 
