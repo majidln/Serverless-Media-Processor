@@ -1,6 +1,6 @@
 import { APIGatewayProxyEventV2WithJWTAuthorizer } from 'aws-lambda';
 import { beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { handler } from '../../get-upload-url';
+import { handler } from '../../src/get-upload-url';
 
 const USER_ID = '11111111-2222-3333-4444-555555555555';
 const KEY_PATTERN = new RegExp(`^uploads/${USER_ID}/[0-9a-f-]{36}\\.(jpg|png)$`);
@@ -78,7 +78,11 @@ describe('upload URL (get-upload-url.ts)', () => {
 
     describe('rejected requests (SC-3)', () => {
         it.each([
-            ['an unsupported content type', { ...validBody, contentType: 'image/gif', filename: 'a.gif' }, /contentType/],
+            [
+                'an unsupported content type',
+                { ...validBody, contentType: 'image/gif', filename: 'a.gif' },
+                /contentType/,
+            ],
             ['a prototype property as content type', { ...validBody, contentType: 'constructor' }, /contentType/],
             ['a missing content type', { filename: 'a.jpg', size: 10 }, /contentType/],
             ['a missing filename', { contentType: 'image/jpeg', size: 10 }, /filename is required/],
@@ -130,7 +134,9 @@ describe('upload URL (get-upload-url.ts)', () => {
         });
 
         it('returns 401 when the request has no authorizer context at all', async () => {
-            const result = await handler({ body: JSON.stringify(validBody) } as unknown as APIGatewayProxyEventV2WithJWTAuthorizer);
+            const result = await handler({
+                body: JSON.stringify(validBody),
+            } as unknown as APIGatewayProxyEventV2WithJWTAuthorizer);
 
             expect(result.statusCode).toBe(401);
         });

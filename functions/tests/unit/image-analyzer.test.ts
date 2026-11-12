@@ -9,7 +9,7 @@ import {
 } from '@aws-sdk/client-rekognition';
 import { mockClient } from 'aws-sdk-client-mock';
 import { beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { handler } from '../../image-analyzer';
+import { handler } from '../../src/image-analyzer';
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const rekogMock = mockClient(RekognitionClient);
@@ -20,7 +20,7 @@ const upload = (key: string) => JSON.stringify({ bucket: 'test-upload-bucket', k
 const sqsEvent = (...bodies: string[]): SQSEvent =>
     ({
         Records: bodies.map((body, i) => ({ messageId: `msg-${i + 1}`, body })),
-    }) as unknown as SQSEvent;
+    } as unknown as SQSEvent);
 
 describe('analyzer (image-analyzer.ts)', () => {
     beforeEach(() => {
@@ -65,9 +65,7 @@ describe('analyzer (image-analyzer.ts)', () => {
     });
 
     it('returns the record for retry on a transient Rekognition error, and leaves the item alone', async () => {
-        rekogMock.on(DetectLabelsCommand).rejects(
-            new ThrottlingException({ message: 'slow down', $metadata: {} }),
-        );
+        rekogMock.on(DetectLabelsCommand).rejects(new ThrottlingException({ message: 'slow down', $metadata: {} }));
 
         const response = await handler(sqsEvent(upload('photo.jpg')));
 
@@ -76,9 +74,9 @@ describe('analyzer (image-analyzer.ts)', () => {
     });
 
     it('records FAILED instead of retrying an image Rekognition can never read', async () => {
-        rekogMock.on(DetectLabelsCommand).rejects(
-            new InvalidImageFormatException({ message: 'bad format', $metadata: {} }),
-        );
+        rekogMock
+            .on(DetectLabelsCommand)
+            .rejects(new InvalidImageFormatException({ message: 'bad format', $metadata: {} }));
         ddbMock.on(UpdateCommand).resolves({});
 
         const response = await handler(sqsEvent(upload('photo.jpg')));
@@ -93,9 +91,7 @@ describe('analyzer (image-analyzer.ts)', () => {
 
     it('returns the record for retry when the item does not exist', async () => {
         rekogMock.on(DetectLabelsCommand).resolves({ Labels: [{ Name: 'Dog' }] });
-        ddbMock.on(UpdateCommand).rejects(
-            new ConditionalCheckFailedException({ message: 'no item', $metadata: {} }),
-        );
+        ddbMock.on(UpdateCommand).rejects(new ConditionalCheckFailedException({ message: 'no item', $metadata: {} }));
 
         const response = await handler(sqsEvent(upload('photo.jpg')));
 

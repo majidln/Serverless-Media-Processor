@@ -1,4 +1,8 @@
-# Media Processor: AI-Powered Image Tagger
+# Darkroom
+
+> A serverless, event-driven image pipeline on AWS: S3 → SNS fan-out → SQS → Lambda → Rekognition & DynamoDB, built with SAM and TypeScript.
+
+Darkroom was called *media-processor* through V1 to V5. The architecture diagrams below keep their original file names.
 
 ### V5: Secure Event-Driven Image Uploads & AI Analysis
 
@@ -26,12 +30,15 @@ The application follows a simple serverless architecture:
 
 ```
 .
-├── functions/                  # Lambda function source code
-│   ├── get-upload-url.ts       # Get a presigned URL for upload to S3
-│   ├── image-dispatcher.ts     # Initial DB log & SNS broadcast
-│   ├── image-analyzer.ts       # SNS subscriber for AI analysis
-│   ├── tests/unit/             # Unit tests (aws-sdk-client-mock)
-│   └── package.json            # Dependencies (AWS SDK v3)
+├── functions/                  # Lambda functions (one package, bundled per function by SAM)
+│   ├── src/
+│   │   ├── get-upload-url.ts   # Get a presigned URL for upload to S3
+│   │   ├── image-dispatcher.ts # Initial DB log & SNS broadcast
+│   │   └── image-analyzer.ts   # SQS consumer for AI analysis
+│   ├── tests/
+│   │   ├── unit/               # Unit tests (aws-sdk-client-mock)
+│   │   └── live/               # Tests against the deployed stack
+│   └── package.json            # Dependencies (AWS SDK v3) and scripts
 ├── events/                 # Mock events for local testing
 │   └── s3-event.json       # Generated S3 Put event
 ├── template.yaml           # SAM template (Infrastructure as Code)
@@ -104,6 +111,28 @@ Run the function using a mock S3 event:
 sam local invoke ImageDispatcherFunction -e events/s3-event.json --env-vars env.json
 ```
 
+
+## Tests
+
+Unit tests use mocked AWS clients and need nothing deployed:
+
+```bash
+cd functions
+npm test             # compile + unit tests
+npm run lint         # ESLint, which also enforces Prettier
+npm run format       # format src/ and tests/ with Prettier
+npm run format:check # the same check without writing
+```
+
+Live tests run against the **deployed** stack with your AWS credentials. Most of this project is events and queues rather than HTTP, so the live tests assert on S3, DynamoDB, SQS and CloudWatch directly. They look every resource up from the stack (`STACK_NAME`, default `darkroom`) and clean up after themselves.
+
+```bash
+cd functions
+npm run test:live       # about 1 minute: upload API, S3 limits, upload -> labels, duplicates, FAILED, prefix filter
+npm run test:live:dlq   # about 10 minutes: a poison message reaches the DLQ and raises the alarm
+```
+
+They call the upload Lambda directly with a synthetic identity instead of signing in, so no Cognito user is needed. Set `LIVE_TEST_IMAGE=/path/to/photo.jpg` to use your own photo and get real labels. Each run costs a few cents at most.
 
 ## Clean Up
 

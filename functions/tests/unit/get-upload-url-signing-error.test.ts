@@ -7,7 +7,7 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({
     }),
 }));
 
-import { handler } from '../../get-upload-url';
+import { handler } from '../../src/get-upload-url';
 
 describe('upload URL signing failure (get-upload-url.ts)', () => {
     it('returns 500 without leaking the error', async () => {

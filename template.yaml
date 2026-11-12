@@ -1,8 +1,39 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: Media Processor - AI-Powered Image Tagger
+Description: Darkroom - a serverless, event-driven image pipeline (S3, SNS, SQS, Lambda, Rekognition, DynamoDB)
+
+# Layout: shared settings, then one section per part of the pipeline in the order a request flows:
+# auth -> API -> storage -> upload -> fan-out topic -> dispatcher -> analyzer -> outputs.
+#
+# Logical IDs are part of the deployed stack. Renaming one makes CloudFormation replace the
+# resource, which for the user pool, table and bucket means losing users and data. Don't rename
+# them as a tidy-up.
+
+Parameters:
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    Description: How long each Lambda function keeps its logs
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 180, 365]
+
+# Settings every function shares. Memory and timeout stay on the functions that set them,
+# because the upload function intentionally keeps the Lambda defaults.
+Globals:
+  Function:
+    CodeUri: functions/
+    Runtime: nodejs20.x
+    Architectures:
+      - arm64
+
+# SAM has no Globals for Metadata and CloudFormation doesn't support YAML anchors, so the esbuild
+# block is repeated per function. Only EntryPoints differs. @aws-sdk/* is left out of the bundle
+# because the Node.js runtime already provides it.
 
 Resources:
+
+  # ---------------------------------------------------------------------------
+  # Auth
+  # ---------------------------------------------------------------------------
 
   AuthCognitoUserPool:
     Type: AWS::Cognito::UserPool
@@ -30,7 +61,11 @@ Resources:
         - ALLOW_USER_PASSWORD_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
 
-  MediaProcessorApi:
+  # ---------------------------------------------------------------------------
+  # API: every route needs a valid Cognito JWT unless it says otherwise
+  # ---------------------------------------------------------------------------
+
+  DarkroomApi:
     Type: AWS::Serverless::HttpApi
     Properties:
       Name: !Sub "${AWS::StackName}-image-api"
@@ -40,7 +75,7 @@ Resources:
         AllowMethods:
           - POST
           - GET
-          - OPTIONS 
+          - OPTIONS
         AllowHeaders:
           - Authorization
           - Content-Type
@@ -54,6 +89,10 @@ Resources:
               Audience:
                 - !Ref AuthCognitoUserPoolClient
         DefaultAuthorizer: CognitoJwtAuthorizer
+
+  # ---------------------------------------------------------------------------
+  # Storage
+  # ---------------------------------------------------------------------------
 
   ImageMetadataTable:
     Type: AWS::Serverless::SimpleTable
@@ -69,21 +108,22 @@ Resources:
         CorsRules:
           - AllowedHeaders: ["*"]
             AllowedMethods: [GET, PUT, POST, HEAD]
-            AllowedOrigins: ['*']
+            AllowedOrigins: ["*"]
             MaxAge: 3000
+
+  # ---------------------------------------------------------------------------
+  # Upload: POST /upload returns a presigned PUT URL for a server-generated key
+  # ---------------------------------------------------------------------------
 
   GetUploadUrlLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      RetentionInDays: 14
+      RetentionInDays: !Ref LogRetentionDays
 
   GetUploadUrlFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: functions/
       Handler: get-upload-url.handler
-      Runtime: nodejs20.x
-      Architectures: [arm64]
       LoggingConfig:
         LogGroup: !Ref GetUploadUrlLogGroup
       Environment:
@@ -96,7 +136,7 @@ Resources:
         UploadApi:
           Type: HttpApi
           Properties:
-            ApiId: !Ref MediaProcessorApi
+            ApiId: !Ref DarkroomApi
             Path: /upload
             Method: post
     Metadata:
@@ -108,13 +148,75 @@ Resources:
           - "@aws-sdk/*"
         Format: "cjs"
         EntryPoints:
-          - get-upload-url.ts
+          - src/get-upload-url.ts
+
+  # ---------------------------------------------------------------------------
+  # Fan-out topic: the dispatcher publishes each upload here once, and every consumer
+  # gets its own queue (with its own DLQ) subscribed to it. A new consumer is a new
+  # queue, subscription and function; nothing in this section changes.
+  # ---------------------------------------------------------------------------
 
   ImageEventsTopic:
     Type: AWS::SNS::Topic
 
-  # Fan-out: every consumer gets its own queue (with its own DLQ) subscribed to the topic.
-  # A new consumer is a new queue, a subscription and a function; nothing here changes.
+  # ---------------------------------------------------------------------------
+  # Dispatcher: S3 upload -> item in DynamoDB -> message on the topic
+  # ---------------------------------------------------------------------------
+
+  ImageDispatcherLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref LogRetentionDays
+
+  ImageDispatcherFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: image-dispatcher.handler
+      MemorySize: 256
+      Timeout: 30
+      LoggingConfig:
+        LogGroup: !Ref ImageDispatcherLogGroup
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ImageMetadataTable
+          TOPIC_ARN: !Ref ImageEventsTopic
+      Policies:
+        # It writes the item, reads it back on a duplicate event, and publishes. It never reads S3.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+              Resource: !GetAtt ImageMetadataTable.Arn
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt ImageEventsTopic.TopicName
+      Events:
+        NewFileEvent:
+          Type: S3
+          Properties:
+            Bucket: !Ref UploadBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: uploads/
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+        External:
+          - "@aws-sdk/*"
+        Format: "cjs"
+        EntryPoints:
+          - src/image-dispatcher.ts
+
+  # ---------------------------------------------------------------------------
+  # Analyzer: queue -> Rekognition labels -> analysis attribute in DynamoDB
+  # A message that fails 3 times moves to the DLQ, and the alarm fires.
+  # ---------------------------------------------------------------------------
+
   AnalyzerDeadLetterQueue:
     Type: AWS::SQS::Queue
     Properties:
@@ -130,6 +232,7 @@ Resources:
         deadLetterTargetArn: !GetAtt AnalyzerDeadLetterQueue.Arn
         maxReceiveCount: 3
 
+  # Only this topic may send to this queue.
   AnalyzerQueuePolicy:
     Type: AWS::SQS::QueuePolicy
     Properties:
@@ -174,72 +277,15 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
 
-  ImageDispatcherLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      RetentionInDays: 14
-
-  ImageDispatcherFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: functions/
-      Handler: image-dispatcher.handler
-      Runtime: nodejs20.x
-      Architectures:
-        - arm64
-      MemorySize: 256
-      Timeout: 30
-      LoggingConfig:
-        LogGroup: !Ref ImageDispatcherLogGroup
-      Environment:
-        Variables:
-          TABLE_NAME: !Ref ImageMetadataTable
-          TOPIC_ARN: !Ref ImageEventsTopic
-      Policies:
-        # It writes the item, reads it back on a duplicate event, and publishes. It never reads S3.
-        - Statement:
-            - Effect: Allow
-              Action:
-                - dynamodb:PutItem
-                - dynamodb:GetItem
-              Resource: !GetAtt ImageMetadataTable.Arn
-        - SNSPublishMessagePolicy:
-            TopicName: !GetAtt ImageEventsTopic.TopicName
-      Events:
-        NewFileEvent:
-          Type: S3
-          Properties:
-            Bucket: !Ref UploadBucket
-            Events: s3:ObjectCreated:*
-            Filter:
-              S3Key:
-                Rules:
-                  - Name: prefix
-                    Value: uploads/
-    Metadata:
-      BuildMethod: esbuild
-      BuildProperties:
-        Minify: true
-        Target: "es2020"
-        External:
-          - "@aws-sdk/*"
-        Format: "cjs"
-        EntryPoints:
-          - image-dispatcher.ts
-
   ImageAnalyzerLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      RetentionInDays: 14
+      RetentionInDays: !Ref LogRetentionDays
 
   ImageAnalyzerFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: functions/
       Handler: image-analyzer.handler
-      Runtime: nodejs20.x
-      Architectures:
-        - arm64
       MemorySize: 256
       Timeout: 30
       LoggingConfig:
@@ -275,12 +321,12 @@ Resources:
           - "@aws-sdk/*"
         Format: "cjs"
         EntryPoints:
-          - image-analyzer.ts
+          - src/image-analyzer.ts
 
 Outputs:
   ApiUrl:
     Description: "API Gateway HTTP API endpoint URL"
-    Value: !Sub "https://${MediaProcessorApi}.execute-api.${AWS::Region}.amazonaws.com"
+    Value: !Sub "https://${DarkroomApi}.execute-api.${AWS::Region}.amazonaws.com"
   BucketName:
     Description: "Upload bucket name"
     Value: !Ref UploadBucket

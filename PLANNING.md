@@ -1,4 +1,4 @@
-# Media Processor: V6 Execution Roadmap
+# Darkroom: V6 Execution Roadmap
 
 Harden the V5 image pipeline and add image resizing as a second consumer of the SNS fan-out. V5 was built as a first SAM project; V6 fixes what it left behind and proves the fan-out design by adding a consumer that has nothing to do with Rekognition.
 
@@ -15,7 +15,7 @@ Out of scope: frontend, Bedrock or other new AI features, Step Functions, Powert
 | 0 | Baseline and a working test setup | Done | `step-0-complete` | Free |
 | 1 | Failures stop being silent | Done | `step-1-complete` | Free |
 | 2 | Safe uploads and unique keys | Done | `step-2-complete` | Free |
-| 3 | Queues between SNS and the consumers | Built and tested, not deployed | `step-3-complete` | Free |
+| 3 | Queues between SNS and the consumers | Done and verified live on the `darkroom` stack; not committed or tagged yet | `step-3-complete` | Free |
 | 4 | Image resizer | Not started | `step-4-complete` | S3 storage only, cents |
 | 5 | Docs and cleanup | Not started | `v6-complete` | Free |
 
@@ -90,7 +90,9 @@ We want a pipeline that never loses an upload silently, keeps every user's image
 | **Resizer output** | A separate `ProcessedBucket`, never the upload bucket. The upload trigger is also filtered to the `uploads/` prefix. Variants: `thumb` (256 px) and `medium` (1024 px) WebP, keyed `{sub}/{uuid}_thumb.webp` and `{sub}/{uuid}_medium.webp`. Fit inside the box, keep aspect ratio, never upscale |
 | **Resizer library** | `sharp` if it builds and runs on arm64 Lambda (spike first); fallback is `jimp` (pure JS, slower). See §6 |
 | **Names** | No hardcoded bucket or topic names; CloudFormation generates them |
-| **Logs** | 14-day retention on every function's log group; don't log whole events |
+| **Logs** | 14-day retention on every function's log group (the `LogRetentionDays` parameter); don't log whole events |
+| **Code layout** | Handlers live in `functions/src/` and tests in `functions/tests/`. `CodeUri` stays `functions/` (where `package.json` is), and `EntryPoints` are `src/<name>.ts`; the bundles still land at the root of each function, so the `Handler` values don't change. Prettier (2.8.8, 4 spaces, single quotes, width 120) is enforced through ESLint and `npm run format` |
+| **Template layout** | `Globals` holds `CodeUri`, runtime and architecture; resources are grouped by feature in the order a request flows. Logical IDs never change as a tidy-up: renaming the user pool, table or bucket would make CloudFormation replace them and lose users and data. Verified as a no-op: the change set against the deployed stack was empty |
 | **Rollback** | `disable_rollback` is turned off once the stack is stable (end of Step 3) |
 
 Each consumer owns its own part of the item, so consumers never overwrite each other:
@@ -131,6 +133,7 @@ Tag the current commit `v5-baseline`. Replace the broken test with a working set
 | `ImageProcessorFunction` | `ImageDispatcherFunction` | Matches the role in the README and this plan |
 | `MyCognitoAuthorizer` | `CognitoJwtAuthorizer` | Drops the template leftover and says what it is |
 | package `image_logger` | `media-processor-functions` | Matches the folder and project |
+| project `media-processor`, stack `media-processor`, logical ID `MediaProcessorApi` | `darkroom` (repo `darkroom-image-pipeline-serverless`, package `darkroom-functions`, `DarkroomApi`) | Renamed after Step 3. A new stack name creates a new stack, so it was done while the stack held only test data, and the logical ID was renamed at the same time because that is free on a fresh stack |
 
 *The function rename replaces that Lambda on the next deploy (new physical name and log group). Test files were renamed to match.*
 
@@ -146,7 +149,7 @@ Rethrow errors (or collect failures and throw at the end). Make the dispatcher's
 **The point: a failure must be visible and retryable, never disguised as success.**
 
 **Exit:**
-- [x] A forced Rekognition error fails the invocation. *(unit test; the live check waits for the first deploy in Step 3)*
+- [x] A forced Rekognition error fails the invocation. *(unit test; live: a file Rekognition can't read is recorded as `FAILED` without retrying, and a poison message is retried until it reaches the DLQ)*
 - [x] A repeated S3 event leaves the item unchanged. *(the write is conditional; a duplicate is ignored once the analysis has finished)*
 - [x] The analyzer never creates an item that doesn't exist. *(`attribute_exists(id)`; a missing item fails the invocation)*
 - [x] The stored item uses the `analysis` map from §3. *(`PENDING` from the dispatcher, then `COMPLETE` with labels or `FAILED` with an error name; the top-level `status` is gone)*
@@ -161,8 +164,8 @@ The client picks the S3 key, so `photo.jpg` from two users is one object and one
 Generate the key on the server from the user's `sub` and a UUID. Validate `filename`, `contentType` and `size` before signing, and sign `ContentType` and `ContentLength`. Return `400` with a clear message when validation fails, instead of the generic `500`.
 
 **Exit:**
-- [x] Two uploads named `photo.jpg` produce two objects and two items, each under the caller's `sub` (SC-2). *(two calls give two different `uploads/{sub}/{uuid}.jpg` keys; the items follow because the item id is the key; the live check waits for the first deploy)*
-- [x] A wrong type, a wrong extension or an oversized request gets `400`; a PUT that doesn't match the signed type or length is rejected by S3 (SC-3). *(`400` is unit-tested for 13 bad inputs; the signed URL lists `content-length;content-type;host`, checked in a unit test; S3's own rejection is not tried until the first deploy)*
+- [x] Two uploads named `photo.jpg` produce two objects and two items, each under the caller's `sub` (SC-2). *(unit-tested, and live: two calls give two different `uploads/{sub}/{uuid}.jpg` keys, and the item id is the key)*
+- [x] A wrong type, a wrong extension or an oversized request gets `400`; a PUT that doesn't match the signed type or length is rejected by S3 (SC-3). *(`400` is unit-tested for 13 bad inputs; the signed URL lists `content-length;content-type;host`, checked in a unit test; live: S3 answers `403` to a PUT with a different content type or a different length)*
 - [x] The upload bucket's trigger only fires for the `uploads/` prefix. *(S3 `prefix` filter, present in the built template)*
 - [x] Unit tests cover valid, invalid, missing-claim and malformed-body cases. *(41 tests in total, 100% coverage)*
 
@@ -176,12 +179,12 @@ The analyzer hangs directly off SNS, so a bad message is retried a few times by 
 Subscribe an SQS queue (with a DLQ) to the topic and move the analyzer onto it, reporting partial batch failures. Remove the unused topic policy and the hardcoded names. Add log retention and an alarm on each DLQ. Turn `disable_rollback` off.
 
 **Exit:**
-- [ ] Analyzer reads from its queue and handles a batch with one bad record: the others are processed once, the bad one is retried and then lands in the DLQ (SC-1). *(the batch behavior is unit-tested: 3 records, 1 malformed, the other 2 updated once each; the retry and the DLQ need the deploy)*
-- [ ] The DLQ alarm is forced into `ALARM` once and fires. *(the alarm is defined; the check needs the deploy)*
+- [x] Analyzer reads from its queue and handles a batch with one bad record: the others are processed once, the bad one is retried and then lands in the DLQ (SC-1). *(unit-tested: 3 records, 1 malformed, the other 2 updated once each; live: a poison message reached the DLQ after 3 attempts in about 9.5 minutes)*
+- [x] The DLQ alarm is forced into `ALARM` once and fires. *(live: `ALARM` about 3 minutes after the message reached the DLQ)*
 - [x] `ImageEventsTopicPolicy` is gone; no `BucketName` or `TopicName` in the template (SC-8). *(the queue policy that replaces it only lets this topic send to this queue)*
-- [ ] A second stack deploys without name collisions, or a rename is proven by an in-place update after emptying the bucket. *(needs the deploy)*
-- [ ] The full flow (upload → item → labels) works end to end after the change. *(needs the deploy)*
-- [ ] `disable_rollback` is turned off once the first deploy is stable.
+- [x] A second stack deploys without name collisions, or a rename is proven by an in-place update after emptying the bucket. *(the project rename created `darkroom` next to the running `media-processor` stack with no collisions; the fast live suite passed 10 of 10 on it; the old stack was then emptied and deleted)*
+- [x] The full flow (upload → item → labels) works end to end after the change. *(live: `analysis` was `COMPLETE` about 4 seconds after the upload)*
+- [x] `disable_rollback` is turned off once the first deploy is stable. *(`samconfig.toml` now says `false`)*
 
 *Notes: beyond the plan, the dispatcher's IAM is narrowed to `PutItem` and `GetItem` and its S3 read policy is removed, because it never reads S3 (that also removes the stack-name workaround the old policy needed to avoid a circular dependency). The analyzer's table access is `UpdateItem` only. Log groups come from `LoggingConfig` with 14-day retention. The subscription uses raw delivery plus a filter policy on `eventType`. The DLQ alarm has no notification action yet, so it only changes state; an email or chat target is a later addition. The first deploy also decides the open question about `@aws-sdk/*` being external.*
 

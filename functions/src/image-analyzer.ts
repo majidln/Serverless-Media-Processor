@@ -1,11 +1,11 @@
 import { SQSBatchItemFailure, SQSBatchResponse, SQSEvent, SQSRecord } from 'aws-lambda';
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import {
     DetectLabelsCommand,
     ImageTooLargeException,
     InvalidImageFormatException,
-    RekognitionClient
+    RekognitionClient,
 } from '@aws-sdk/client-rekognition';
 
 const ddbClient = new DynamoDBClient({});
@@ -17,13 +17,15 @@ const tableName = process.env.TABLE_NAME;
 // This function owns the `analysis` attribute and writes nothing else.
 // The condition keeps it from creating an item the dispatcher never wrote.
 const saveAnalysis = async (key: string, analysis: Record<string, unknown>): Promise<void> => {
-    await ddbDocClient.send(new UpdateCommand({
-        TableName: tableName,
-        Key: { id: key },
-        UpdateExpression: "SET analysis = :a",
-        ConditionExpression: "attribute_exists(id)",
-        ExpressionAttributeValues: { ":a": { ...analysis, at: new Date().toISOString() } }
-    }));
+    await ddbDocClient.send(
+        new UpdateCommand({
+            TableName: tableName,
+            Key: { id: key },
+            UpdateExpression: 'SET analysis = :a',
+            ConditionExpression: 'attribute_exists(id)',
+            ExpressionAttributeValues: { ':a': { ...analysis, at: new Date().toISOString() } },
+        }),
+    );
 };
 
 // Throws on any failure, so the caller can report the record for retry.
@@ -37,12 +39,14 @@ const processRecord = async (record: SQSRecord): Promise<void> => {
 
     let labels: (string | undefined)[];
     try {
-        const rekogResponse = await rekogClient.send(new DetectLabelsCommand({
-            Image: { S3Object: { Bucket: bucket, Name: key } },
-            MaxLabels: 5,
-            MinConfidence: 70,
-        }));
-        labels = rekogResponse.Labels?.map(label => label.Name) || [];
+        const rekogResponse = await rekogClient.send(
+            new DetectLabelsCommand({
+                Image: { S3Object: { Bucket: bucket, Name: key } },
+                MaxLabels: 5,
+                MinConfidence: 70,
+            }),
+        );
+        labels = rekogResponse.Labels?.map((label) => label.Name) || [];
     } catch (error) {
         if (error instanceof InvalidImageFormatException || error instanceof ImageTooLargeException) {
             console.error(`Image ${key} cannot be analyzed: ${error.name}`);
