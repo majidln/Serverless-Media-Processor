@@ -89,7 +89,7 @@ A transient failure (S3, DynamoDB, throttling) is not recorded. The message is r
 
 ## Get a token and upload an image
 
-This walkthrough needs the AWS CLI, `curl` and `jq`. It creates a user directly in the pool, which is fine for development.
+This is the manual version of `scripts/try-it.sh` (see [Calling the API with curl](#calling-the-api-with-curl)). It needs the AWS CLI, `curl` and `jq`, and creates a user directly in the pool, which is fine for development.
 
 ```bash
 STACK=darkroom; REGION=us-east-1
@@ -135,6 +135,84 @@ aws dynamodb get-item --region $REGION --table-name $TABLE --key "{\"id\":{\"S\"
 aws s3 ls "s3://$PROCESSED/" --recursive
 ```
 
+## Calling the API with curl
+
+<details>
+<summary>Every call and failure case, one at a time (click to expand)</summary>
+
+To run all of this in one go, use the script. It signs in (creating the demo user on the first run), uploads the image, waits for both consumers, prints the result and checks the failure cases below:
+
+```bash
+DARKROOM_PASSWORD='YOUR-PASSWORD' scripts/try-it.sh path/to/photo.jpg
+```
+
+It needs the AWS CLI, `curl` and `jq`, and prompts for the password if the variable isn't set. Pass `--no-failure-cases` to skip the rejection checks, and see `--help` for `STACK`, `AWS_REGION` and `DARKROOM_USER`.
+
+What follows is the same thing one call at a time. There is one HTTP endpoint, `POST /upload`. The upload itself goes straight to S3 with the URL it returns, so API Gateway and Lambda never handle the image bytes. The commands reuse `API`, `TOKEN` and `FILE` from the walkthrough above.
+
+**1. Ask for an upload URL**
+
+```bash
+SIZE=$(wc -c < "$FILE" | tr -d ' ')
+
+curl -i -X POST "$API/upload" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"filename\":\"$FILE\",\"contentType\":\"image/jpeg\",\"size\":$SIZE}"
+```
+
+`200` returns the URL to upload to and the key the server chose:
+
+```json
+{ "uploadUrl": "https://...s3.amazonaws.com/uploads/<sub>/<uuid>.jpg?X-Amz-...", "key": "uploads/<sub>/<uuid>.jpg", "message": "..." }
+```
+
+**2. Upload the file to S3**
+
+Send exactly the content type and size you declared. Both are signed into the URL.
+
+```bash
+curl -i -X PUT "$UPLOAD_URL" -H "Content-Type: image/jpeg" --data-binary @"$FILE"
+```
+
+S3 answers `200` with an empty body. The pipeline starts from this upload, so there is no further call to make.
+
+**3. Check the result**
+
+There is no read endpoint yet, so look at the item and the copies directly:
+
+```bash
+aws dynamodb get-item --region $REGION --table-name $TABLE --key "{\"id\":{\"S\":\"$KEY\"}}"
+aws s3 ls "s3://$PROCESSED/" --recursive
+```
+
+**Failure cases**
+
+```bash
+# 401: no token (the authorizer answers before the Lambda runs)
+curl -i -X POST "$API/upload" -H "Content-Type: application/json" \
+  -d '{"filename":"photo.jpg","contentType":"image/jpeg","size":1000}'
+
+# 400: type not allowed (only image/jpeg and image/png)
+curl -i -X POST "$API/upload" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"filename":"doc.pdf","contentType":"application/pdf","size":1000}'
+
+# 400: extension does not match the type
+curl -i -X POST "$API/upload" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"filename":"photo.png","contentType":"image/jpeg","size":1000}'
+
+# 400: larger than 10 MB
+curl -i -X POST "$API/upload" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"filename":"photo.jpg","contentType":"image/jpeg","size":20000000}'
+
+# 403 from S3: the PUT differs from what was declared (here, the content type)
+curl -i -X PUT "$UPLOAD_URL" -H "Content-Type: image/png" --data-binary @"$FILE"
+```
+
+The `400` body is `{ "message": "..." }` and says which check failed. The token expires after an hour: if you start getting `401`, run the `initiate-auth` command again.
+
+</details>
+
 ## Project Structure
 
 ```
@@ -152,6 +230,7 @@ aws s3 ls "s3://$PROCESSED/" --recursive
 │   │   └── live/               # Tests against the deployed stack
 │   └── package.json            # Dependencies (AWS SDK v3) and scripts
 ├── layers/sharp/               # sharp for Linux arm64, shipped as a Lambda layer
+├── scripts/try-it.sh           # Sign in, upload an image, wait for both consumers, check the rejections
 ├── events/s3-event.json        # Sample S3 event for sam local invoke
 ├── images/                     # Architecture diagrams from V1 to V5
 ├── template.yaml               # SAM template (infrastructure as code)
@@ -182,7 +261,13 @@ The first deploy creates the stack `darkroom` in `us-east-1`. Bucket, topic and 
 
 ### 2. Try it
 
-Follow [Get a token and upload an image](#get-a-token-and-upload-an-image), or run the live tests below.
+Run the script with any JPEG or PNG. It signs in, uploads the image, waits for both consumers and prints the result:
+
+```bash
+DARKROOM_PASSWORD='YOUR-PASSWORD' scripts/try-it.sh path/to/photo.jpg
+```
+
+To do the same by hand, follow [Get a token and upload an image](#get-a-token-and-upload-an-image), or see [Calling the API with curl](#calling-the-api-with-curl). The live tests below check the deployed stack more thoroughly.
 
 ## Tests
 
