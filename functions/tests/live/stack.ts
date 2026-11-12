@@ -10,11 +10,15 @@ import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 export interface Stack {
     apiUrl: string;
     bucket: string;
+    processedBucket: string;
     table: string;
     uploadFunction: string;
     analyzerQueueUrl: string;
-    deadLetterQueueUrl: string;
-    deadLetterAlarm: string;
+    resizerQueueUrl: string;
+    analyzerDeadLetterQueueUrl: string;
+    resizerDeadLetterQueueUrl: string;
+    analyzerDeadLetterAlarm: string;
+    resizerDeadLetterAlarm: string;
 }
 
 const lambda = new LambdaClient({});
@@ -39,11 +43,15 @@ export const loadStack = async (): Promise<Stack> => {
     return {
         apiUrl,
         bucket: physicalId('UploadBucket'),
+        processedBucket: physicalId('ProcessedBucket'),
         table: physicalId('ImageMetadataTable'),
         uploadFunction: physicalId('GetUploadUrlFunction'),
         analyzerQueueUrl: physicalId('AnalyzerQueue'),
-        deadLetterQueueUrl: physicalId('AnalyzerDeadLetterQueue'),
-        deadLetterAlarm: physicalId('AnalyzerDeadLetterQueueAlarm'),
+        resizerQueueUrl: physicalId('ResizerQueue'),
+        analyzerDeadLetterQueueUrl: physicalId('AnalyzerDeadLetterQueue'),
+        resizerDeadLetterQueueUrl: physicalId('ResizerDeadLetterQueue'),
+        analyzerDeadLetterAlarm: physicalId('AnalyzerDeadLetterQueueAlarm'),
+        resizerDeadLetterAlarm: physicalId('ResizerDeadLetterQueueAlarm'),
     };
 };
 

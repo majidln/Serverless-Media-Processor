@@ -16,8 +16,8 @@ Out of scope: frontend, Bedrock or other new AI features, Step Functions, Powert
 | 1 | Failures stop being silent | Done | `step-1-complete` | Free |
 | 2 | Safe uploads and unique keys | Done | `step-2-complete` | Free |
 | 3 | Queues between SNS and the consumers | Done and verified live on the `darkroom` stack; not committed or tagged yet | `step-3-complete` | Free |
-| 4 | Image resizer | Not started | `step-4-complete` | S3 storage only, cents |
-| 5 | Docs and cleanup | Not started | `v6-complete` | Free |
+| 4 | Image resizer | Done and verified live on `darkroom`; not committed or tagged yet | `step-4-complete` | S3 storage only, cents |
+| 5 | Docs and cleanup | Done except the end-to-end walkthrough run | `v6-complete` | Free |
 
 ---
 
@@ -70,7 +70,7 @@ We want a pipeline that never loses an upload silently, keeps every user's image
 
 - [x] AWS CLI, SAM CLI and an AWS account with a deployable identity.
 - [x] Node.js 20+ locally; functions run on `nodejs20.x`, arm64.
-- [ ] Docker, only if the resizer's `sharp` binary needs `sam build --use-container` (see §3).
+- [x] Docker is not needed: `sharp` is installed for Linux arm64 through a layer's `.npmrc` (see Step 4).
 - [ ] A Cognito test user to get a token for `/upload`.
 
 ---
@@ -198,25 +198,33 @@ Add a `ProcessedBucket`, a resizer queue with a DLQ and alarm, and `ImageResizer
 Start with a spike: a Hello-world `sharp` function that builds with `sam build` and runs on Lambda arm64. If the native binary is a problem, use `sam build --use-container` or a layer; if that's a time sink, switch to `jimp` (§6).
 
 **Exit:**
-- [ ] Spike result recorded here (which approach, and why).
-- [ ] One upload yields two variants in the processed bucket, within the size limits and with the aspect ratio kept; a small image is not upscaled (SC-5).
-- [ ] One upload triggers exactly one dispatcher invocation, so the processed bucket can't loop (SC-6).
-- [ ] With the resizer deliberately broken, `analysis` still completes; with the analyzer broken, `resize` still completes (SC-4).
-- [ ] A corrupt image goes to the resizer DLQ and the alarm fires.
-- [ ] Resizer unit tests with a small fixture image.
+- [x] Spike result recorded here (which approach, and why). *(see the notes below: a layer, installed for Linux arm64 by a `.npmrc`; no Docker and no `jimp`)*
+- [x] One upload yields two variants in the processed bucket, within the size limits and with the aspect ratio kept; a small image is not upscaled (SC-5). *(unit-tested with real `sharp`: 3000×2000 gives 256×171 and 1024×683, a portrait fits by height, 100×50 stays 100×50; live: the 320×240 fixture gave a 256×192 thumb and an unchanged 320×240 medium, both `image/webp`)*
+- [x] One upload triggers exactly one dispatcher invocation, so the processed bucket can't loop (SC-6). *(by construction: copies go to another bucket, and the upload trigger is limited to `uploads/`; live: no item appeared for either copy, and the item's `resize.at` did not change on a repeated event)*
+- [x] With the resizer deliberately broken, `analysis` still completes; with the analyzer broken, `resize` still completes (SC-4). *(unit-tested per handler; live: a 56-megapixel PNG made the resizer fail (`UnreadableImage`) while the analysis completed; the other direction is only unit-tested)*
+- [x] A poison message goes to the resizer DLQ and the alarm fires. *(changed from "a corrupt image", see the notes; live: the slow suite sent one to each consumer, both reached their DLQ after 3 attempts, the analyzer's in about 9 minutes and the resizer's in about 18, and both alarms went to `ALARM` about 2 minutes later)*
+- [x] Resizer unit tests with a small fixture image. *(15 tests with real `sharp`, 59 in total)*
+
+*Notes:*
+- *Spike: `sharp` can't be bundled by esbuild because it is native code, and SAM does not package externals. It ships as a layer (`layers/sharp`), built by `sam build` on the Mac. The layer's `.npmrc` sets `os=linux`, `cpu=arm64` and `libc=glibc`, so npm installs the Linux arm64 binaries (18 MB, checked as ARM aarch64 ELF files). Docker would also work but isn't needed. The function bundle is 2 KB and requires `sharp` from the layer. It loads on Lambda: the live suite ran it and checked the output sizes.*
+- *A file `sharp` can never read (corrupt, or over 50 megapixels) is recorded as `resize.status = FAILED` with no retry, the same rule as the analyzer. So a corrupt image does not reach the DLQ; a poison message or a transient failure does.*
+- *The dispatcher now starts every item with `analysis` and `resize` both `PENDING`, and publishes again on a duplicate event while either is still pending. The batch loop and the conditional "write my own attribute" update moved into `src/sqs-batch.ts` and `src/item-store.ts`, shared by the analyzer and the resizer.*
+- *The processed bucket blocks all public access. There is still no endpoint to read the copies; that is a later version.*
 
 *S3 storage for the variants only. Cents.*
 
 ### Step 5: The docs describe V5
-The README calls the dispatcher the wrong name in places, had a typo in the project tree, and says nothing about how to get a token and call `/upload`.
+The README described V5: wrong names in places, no walkthrough for getting a token and calling `/upload`, and nothing on the queues, DLQs, resizer or live tests.
 
 Update the README for V6: architecture, project tree, status values, a short "get a token and upload" walkthrough with `curl`, local testing for the new functions, and clean-up for both buckets. Update the diagram (a Mermaid version is fine; the `Media-Processor-V6` image is redrawn by hand). Tag `v6-complete`.
 
 **Exit:**
-- [ ] README matches the code and the template.
-- [ ] The walkthrough works from a clean deploy, copy and paste.
-- [ ] Diagram updated.
-- [ ] Final `npm test`, `sam validate --lint` and `sam build` pass (SC-9).
+- [x] README matches the code and the template. *(rewritten for V6: architecture, item shape and statuses, the upload API contract, project tree, prerequisites without a global esbuild or Docker, tests, local development, failure handling, how to add a consumer, cost, clean-up for both buckets; the counts and names in it were checked against the template and the code)*
+- [ ] The walkthrough works from a clean deploy, copy and paste. *(written and syntax-checked: all 10 shell blocks pass `bash -n`, and the Cognito commands and flags exist in the installed AWS CLI. Not run end to end, because it needs a Cognito user and password and I did not create one. The live suite covers the same upload code by calling the Lambda directly, but not the sign-in and API Gateway hop with a real token)*
+- [x] Diagram updated. *(a Mermaid flowchart in the README; the V1 to V5 images are kept as history; not rendered here, so check it on GitHub)*
+- [x] Final `npm test`, `sam validate --lint` and `sam build` pass (SC-9). *(59 unit tests, ESLint with no warnings, Prettier clean, `tsc`, validate and build)*
+
+*Notes: `env.example.json` now includes `TOPIC_ARN`, and `events/s3-event.json` uses a key under `uploads/`. The README warns that `sam local invoke` writes to the real table and publishes a real message, so it should point at an object that exists. That path was not run either, because Docker was not running.*
 
 *Free.*
 
@@ -238,7 +246,7 @@ Validate and test locally → deploy → verify the exit criteria by hand with a
 
 | Question | Recommendation | Decision |
 |---|---|---|
-| Resizer library (Step 4) | `sharp`, after a build spike on arm64; `jimp` if the native binary becomes a time sink | Open |
+| Resizer library (Step 4) | `sharp`, after a build spike on arm64; `jimp` if the native binary becomes a time sink | `sharp`, as a Linux arm64 layer; the spike passed |
 | SNS → SQS now, or SNS → Lambda direct with rethrown errors only (Step 3) | SNS → SQS: it's what makes the retry, DLQ and alarm fixes real, and the resizer needs its own queue anyway | SNS → SQS, done in Step 3 |
 | Fresh deploy or in-place update (Step 3) | `sam delete` and a fresh deploy: removing the names replaces the bucket and topic, and the data is disposable | Fresh deploy, when the stack is deployed |
 | A read endpoint (`GET /images/{id}` with presigned GET URLs for the variants) | Not in V6. Without it, results are checked in the S3 console and DynamoDB; add it in V7 | Open |

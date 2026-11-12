@@ -1,0 +1,9 @@
+{
+    "name": "darkroom-sharp-layer",
+    "version": "1.0.0",
+    "private": true,
+    "description": "sharp (libvips) for the Linux arm64 Lambda runtime, shipped as a layer",
+    "dependencies": {
+        "sharp": "^0.34.5"
+    }
+}
