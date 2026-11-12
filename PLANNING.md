@@ -15,9 +15,9 @@ Out of scope: frontend, Bedrock or other new AI features, Step Functions, Powert
 | 0 | Baseline and a working test setup | Done | `step-0-complete` | Free |
 | 1 | Failures stop being silent | Done | `step-1-complete` | Free |
 | 2 | Safe uploads and unique keys | Done | `step-2-complete` | Free |
-| 3 | Queues between SNS and the consumers | Done and verified live on the `darkroom` stack; not committed or tagged yet | `step-3-complete` | Free |
-| 4 | Image resizer | Done and verified live on `darkroom`; not committed or tagged yet | `step-4-complete` | S3 storage only, cents |
-| 5 | Docs and cleanup | Done except the end-to-end walkthrough run | `v6-complete` | Free |
+| 3 | Queues between SNS and the consumers | Done, verified live on the `darkroom` stack | `step-3-complete` | Free |
+| 4 | Image resizer | Done, verified live on `darkroom` | `step-4-complete` | S3 storage only, cents |
+| 5 | Docs and cleanup | Done | `v6-complete` | Free |
 
 ---
 
@@ -71,7 +71,7 @@ We want a pipeline that never loses an upload silently, keeps every user's image
 - [x] AWS CLI, SAM CLI and an AWS account with a deployable identity.
 - [x] Node.js 20+ locally; functions run on `nodejs20.x`, arm64.
 - [x] Docker is not needed: `sharp` is installed for Linux arm64 through a layer's `.npmrc` (see Step 4).
-- [ ] A Cognito test user to get a token for `/upload`.
+- [x] A Cognito test user to get a token for `/upload`. *(`darkroom-demo@example.com`, created and signed in by `scripts/try-it.sh`)*
 
 ---
 
@@ -220,7 +220,7 @@ Update the README for V6: architecture, project tree, status values, a short "ge
 
 **Exit:**
 - [x] README matches the code and the template. *(rewritten for V6: architecture, item shape and statuses, the upload API contract, project tree, prerequisites without a global esbuild or Docker, tests, local development, failure handling, how to add a consumer, cost, clean-up for both buckets; the counts and names in it were checked against the template and the code)*
-- [ ] The walkthrough works from a clean deploy, copy and paste. *(written and syntax-checked: all 10 shell blocks pass `bash -n`, and the Cognito commands and flags exist in the installed AWS CLI. Not run end to end, because it needs a Cognito user and password and I did not create one. The live suite covers the same upload code by calling the Lambda directly, but not the sign-in and API Gateway hop with a real token)*
+- [x] The walkthrough works end to end against the deployed stack. *(run with `scripts/try-it.sh` and a real PNG: sign-in with a real token, `POST /upload` through API Gateway, `PUT` to S3, then both `analysis` and `resize` `COMPLETE` and the `thumb` and `medium` WebP copies in the processed bucket, plus 401, 400 and 403 on the bad requests. The first run exposed a bug in the script's wait loop, which treated an item that did not exist yet as finished, so it reported `Done.` without checking the result; fixed, and the pipeline outcome was confirmed by reading the item and the bucket. Caveat: it was the script that ran, not the README's manual command blocks pasted one by one, and the stack was not a fresh deploy)*
 - [x] Diagram updated. *(a Mermaid flowchart in the README; the V1 to V5 images are kept as history; not rendered here, so check it on GitHub)*
 - [x] Final `npm test`, `sam validate --lint` and `sam build` pass (SC-9). *(59 unit tests, ESLint with no warnings, Prettier clean, `tsc`, validate and build)*
 
