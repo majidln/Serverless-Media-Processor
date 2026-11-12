@@ -1,16 +1,20 @@
 {
-  "name": "media-processor-functions",
+  "name": "darkroom-functions",
   "version": "1.0.0",
-  "description": "Lambda functions for the media processor: upload URLs, dispatching and image analysis",
+  "description": "Lambda functions for Darkroom: upload URLs, dispatching and image analysis",
   "private": true,
   "repository": "https://github.com/awslabs/aws-sam-cli/tree/develop/samcli/local/init/templates/cookiecutter-aws-sam-hello-nodejs",
   "author": "SAM CLI",
   "license": "MIT",
   "scripts": {
     "unit": "jest",
-    "lint": "eslint '*.ts' --quiet --fix",
+    "lint": "eslint 'src/**/*.ts' --quiet --fix",
+    "format": "prettier --write 'src/**/*.ts' 'tests/**/*.ts' '*.ts'",
+    "format:check": "prettier --check 'src/**/*.ts' 'tests/**/*.ts' '*.ts'",
     "compile": "tsc",
-    "test": "npm run compile && npm run unit"
+    "test": "npm run compile && npm run unit",
+    "test:live": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.live.config.ts --runInBand tests/live/pipeline.test.ts",
+    "test:live:dlq": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.live.config.ts --runInBand tests/live/dlq.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.954.0",
@@ -19,10 +23,13 @@
     "@aws-sdk/client-sns": "^3.964.0",
     "@aws-sdk/lib-dynamodb": "^3.954.0",
     "@aws-sdk/s3-request-presigner": "^3.964.0",
-    "esbuild": "^0.28.2",
-    "uuid": "^13.0.0"
+    "esbuild": "^0.28.2"
   },
   "devDependencies": {
+    "@aws-sdk/client-cloudformation": "^3.1167.0",
+    "@aws-sdk/client-cloudwatch": "^3.1167.0",
+    "@aws-sdk/client-lambda": "^3.1167.0",
+    "@aws-sdk/client-sqs": "^3.1167.0",
     "@jest/globals": "^29.2.0",
     "@types/aws-lambda": "^8.10.159",
     "@types/jest": "^29.2.0",

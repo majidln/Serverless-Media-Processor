@@ -4,7 +4,7 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dyn
 import { PublishCommand, SNSClient } from '@aws-sdk/client-sns';
 import { mockClient } from 'aws-sdk-client-mock';
 import { beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { handler } from '../../image-dispatcher';
+import { handler } from '../../src/image-dispatcher';
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const snsMock = mockClient(SNSClient);
@@ -15,7 +15,7 @@ const s3Event = (...keys: string[]): S3Event =>
             eventTime: '2026-01-01T00:00:00.000Z',
             s3: { bucket: { name: 'test-upload-bucket' }, object: { key, size: 2048 } },
         })),
-    }) as unknown as S3Event;
+    } as unknown as S3Event);
 
 const alreadyExists = () => new ConditionalCheckFailedException({ message: 'exists', $metadata: {} });
 

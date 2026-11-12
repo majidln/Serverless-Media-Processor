@@ -1,0 +1,39 @@
+{
+    // CloudFormation and SAM templates use short-form intrinsic functions (!Ref, !GetAtt, ...).
+    // The YAML language server doesn't know them, so it reports "Unresolved tag". Listing them
+    // as custom tags fixes that. Each entry is "<tag> <kind>", where kind is the YAML node type
+    // the tag is written on. Tags that can be written two ways are listed twice.
+    "lsp": {
+        "yaml-language-server": {
+            "settings": {
+                "yaml": {
+                    "customTags": [
+                        "!And sequence",
+                        "!Base64 scalar",
+                        "!Cidr sequence",
+                        "!Condition scalar",
+                        "!Equals sequence",
+                        "!FindInMap sequence",
+                        "!GetAtt scalar",
+                        "!GetAtt sequence",
+                        "!GetAZs scalar",
+                        "!If sequence",
+                        "!ImportValue scalar",
+                        "!Join sequence",
+                        "!Length sequence",
+                        "!Not sequence",
+                        "!Or sequence",
+                        "!Ref scalar",
+                        "!Select sequence",
+                        "!Split sequence",
+                        "!Sub scalar",
+                        "!Sub sequence",
+                        "!ToJsonString mapping",
+                        "!ToJsonString sequence",
+                        "!Transform mapping"
+                    ]
+                }
+            }
+        }
+    }
+}
