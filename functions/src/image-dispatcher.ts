@@ -46,6 +46,7 @@ export const handler = async (event: S3Event): Promise<void> => {
                         timestamp: record.eventTime,
                         createdAt: new Date().toISOString(),
                         analysis: { status: 'PENDING' },
+                        resize: { status: 'PENDING' },
                     },
                     ConditionExpression: 'attribute_not_exists(id)',
                 }),
@@ -58,7 +59,7 @@ export const handler = async (event: S3Event): Promise<void> => {
             }
 
             // The item exists: either a duplicate event, or a retry after the publish below failed.
-            // Publish again only if the analysis hasn't finished, so a retry can't lose the event.
+            // Publish again only while a consumer hasn't finished, so a retry can't lose the event.
             const { Item } = await ddbDocClient.send(
                 new GetCommand({
                     TableName: tableName,
@@ -67,12 +68,13 @@ export const handler = async (event: S3Event): Promise<void> => {
                 }),
             );
 
-            if (Item?.analysis?.status !== 'PENDING') {
-                console.log(`Duplicate event for ${fileKey}, already analyzed`);
+            const unfinished = Item?.analysis?.status === 'PENDING' || Item?.resize?.status === 'PENDING';
+            if (!unfinished) {
+                console.log(`Duplicate event for ${fileKey}, already processed`);
                 continue;
             }
 
-            console.log(`Item for ${fileKey} exists but analysis is pending, publishing again`);
+            console.log(`Item for ${fileKey} exists but is still being processed, publishing again`);
         }
 
         await publishUploadEvent(bucketName, fileKey);

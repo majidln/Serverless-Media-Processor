@@ -40,6 +40,7 @@ describe('dispatcher (image-dispatcher.ts)', () => {
             bucket: 'test-upload-bucket',
             size: 2048,
             analysis: { status: 'PENDING' },
+            resize: { status: 'PENDING' },
         });
         expect(put.ConditionExpression).toBe('attribute_not_exists(id)');
 
@@ -85,18 +86,24 @@ describe('dispatcher (image-dispatcher.ts)', () => {
         await expect(handler(s3Event('photo.jpg'))).rejects.toThrow('sns down');
     });
 
-    it('ignores a duplicate event once the analysis has finished', async () => {
+    it('ignores a duplicate event once every consumer has finished', async () => {
         ddbMock.on(PutCommand).rejects(alreadyExists());
-        ddbMock.on(GetCommand).resolves({ Item: { id: 'photo.jpg', analysis: { status: 'COMPLETE' } } });
+        ddbMock.on(GetCommand).resolves({
+            Item: { id: 'photo.jpg', analysis: { status: 'COMPLETE' }, resize: { status: 'FAILED' } },
+        });
 
         await handler(s3Event('photo.jpg'));
 
         expect(snsMock.commandCalls(PublishCommand)).toHaveLength(0);
     });
 
-    it('publishes again on a retry when the analysis is still pending', async () => {
+    it.each([
+        ['the analysis', { analysis: { status: 'PENDING' }, resize: { status: 'COMPLETE' } }],
+        ['the resize', { analysis: { status: 'COMPLETE' }, resize: { status: 'PENDING' } }],
+        ['both', { analysis: { status: 'PENDING' }, resize: { status: 'PENDING' } }],
+    ])('publishes again on a retry while %s is still pending', async (_name, consumers) => {
         ddbMock.on(PutCommand).rejects(alreadyExists());
-        ddbMock.on(GetCommand).resolves({ Item: { id: 'photo.jpg', analysis: { status: 'PENDING' } } });
+        ddbMock.on(GetCommand).resolves({ Item: { id: 'photo.jpg', ...consumers } });
         snsMock.on(PublishCommand).resolves({});
 
         await handler(s3Event('photo.jpg'));

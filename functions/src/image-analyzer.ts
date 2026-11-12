@@ -1,34 +1,16 @@
-import { SQSBatchItemFailure, SQSBatchResponse, SQSEvent, SQSRecord } from 'aws-lambda';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { SQSEvent, SQSRecord } from 'aws-lambda';
 import {
     DetectLabelsCommand,
     ImageTooLargeException,
     InvalidImageFormatException,
     RekognitionClient,
 } from '@aws-sdk/client-rekognition';
+import { saveItemAttribute } from './item-store';
+import { processBatch } from './sqs-batch';
 
-const ddbClient = new DynamoDBClient({});
-const ddbDocClient = DynamoDBDocumentClient.from(ddbClient);
 const rekogClient = new RekognitionClient({});
 
-const tableName = process.env.TABLE_NAME;
-
-// This function owns the `analysis` attribute and writes nothing else.
-// The condition keeps it from creating an item the dispatcher never wrote.
-const saveAnalysis = async (key: string, analysis: Record<string, unknown>): Promise<void> => {
-    await ddbDocClient.send(
-        new UpdateCommand({
-            TableName: tableName,
-            Key: { id: key },
-            UpdateExpression: 'SET analysis = :a',
-            ConditionExpression: 'attribute_exists(id)',
-            ExpressionAttributeValues: { ':a': { ...analysis, at: new Date().toISOString() } },
-        }),
-    );
-};
-
-// Throws on any failure, so the caller can report the record for retry.
+// Throws on any failure, so the batch can report the record for retry.
 // The one exception is an image Rekognition can never read; retrying would not help,
 // so it is recorded as FAILED on the item.
 const processRecord = async (record: SQSRecord): Promise<void> => {
@@ -50,30 +32,15 @@ const processRecord = async (record: SQSRecord): Promise<void> => {
     } catch (error) {
         if (error instanceof InvalidImageFormatException || error instanceof ImageTooLargeException) {
             console.error(`Image ${key} cannot be analyzed: ${error.name}`);
-            await saveAnalysis(key, { status: 'FAILED', error: error.name });
+            await saveItemAttribute(key, 'analysis', { status: 'FAILED', error: error.name });
             return;
         }
         throw error;
     }
 
-    await saveAnalysis(key, { status: 'COMPLETE', labels });
+    await saveItemAttribute(key, 'analysis', { status: 'COMPLETE', labels });
 
     console.log(`Successfully updated labels for ${key}`);
 };
 
-// Partial batch response: only the records that failed go back to the queue (and to the DLQ
-// after maxReceiveCount), so one bad record doesn't make the rest of the batch run again.
-export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
-    const batchItemFailures: SQSBatchItemFailure[] = [];
-
-    for (const record of event.Records) {
-        try {
-            await processRecord(record);
-        } catch (error) {
-            console.error(`Record ${record.messageId} failed, returning it to the queue:`, error);
-            batchItemFailures.push({ itemIdentifier: record.messageId });
-        }
-    }
-
-    return { batchItemFailures };
-};
+export const handler = (event: SQSEvent) => processBatch(event, processRecord);

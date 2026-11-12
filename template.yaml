@@ -3,7 +3,7 @@ Transform: AWS::Serverless-2016-10-31
 Description: Darkroom - a serverless, event-driven image pipeline (S3, SNS, SQS, Lambda, Rekognition, DynamoDB)
 
 # Layout: shared settings, then one section per part of the pipeline in the order a request flows:
-# auth -> API -> storage -> upload -> fan-out topic -> dispatcher -> analyzer -> outputs.
+# auth -> API -> storage -> upload -> fan-out topic -> dispatcher -> analyzer -> resizer -> outputs.
 #
 # Logical IDs are part of the deployed stack. Renaming one makes CloudFormation replace the
 # resource, which for the user pool, table and bucket means losing users and data. Don't rename
@@ -110,6 +110,17 @@ Resources:
             AllowedMethods: [GET, PUT, POST, HEAD]
             AllowedOrigins: ["*"]
             MaxAge: 3000
+
+  # The resizer writes here and never into UploadBucket: a file written into the upload bucket
+  # would trigger the dispatcher again and loop. Nothing here is public.
+  ProcessedBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
 
   # ---------------------------------------------------------------------------
   # Upload: POST /upload returns a presigned PUT URL for a server-generated key
@@ -323,6 +334,142 @@ Resources:
         EntryPoints:
           - src/image-analyzer.ts
 
+  # ---------------------------------------------------------------------------
+  # Resizer: queue -> thumb and medium WebP copies in ProcessedBucket -> resize attribute in
+  # DynamoDB. Independent of the analyzer: its own queue, DLQ, alarm and attribute.
+  # ---------------------------------------------------------------------------
+
+  # sharp is native code, so it ships as a layer built for Linux arm64 (see layers/sharp/.npmrc)
+  # instead of being bundled by esbuild.
+  SharpLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "${AWS::StackName}-sharp"
+      Description: sharp (libvips) for Linux arm64
+      ContentUri: layers/sharp/
+      CompatibleRuntimes:
+        - nodejs20.x
+      CompatibleArchitectures:
+        - arm64
+      RetentionPolicy: Delete
+    Metadata:
+      BuildMethod: nodejs20.x
+      BuildArchitecture: arm64
+
+  ResizerDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600 # 14 days, the maximum
+
+  ResizerQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      # 6x the resizer's timeout (60 s).
+      VisibilityTimeout: 360
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ResizerDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  # Only this topic may send to this queue.
+  ResizerQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref ResizerQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt ResizerQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref ImageEventsTopic
+
+  ResizerSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref ImageEventsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt ResizerQueue.Arn
+      RawMessageDelivery: true
+      FilterPolicy:
+        eventType:
+          - ObjectCreated
+
+  ResizerDeadLetterQueueAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: A message gave up in the resizer queue and is waiting in its DLQ
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ResizerDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  ImageResizerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref LogRetentionDays
+
+  ImageResizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: image-resizer.handler
+      MemorySize: 1024
+      Timeout: 60
+      Layers:
+        - !Ref SharpLayer
+      LoggingConfig:
+        LogGroup: !Ref ImageResizerLogGroup
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ImageMetadataTable
+          PROCESSED_BUCKET: !Ref ProcessedBucket
+      Events:
+        ResizerQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ResizerQueue.Arn
+            # One image per invocation: resizing is memory-heavy.
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            ScalingConfig:
+              MaximumConcurrency: 5
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref UploadBucket
+        # Write-only on the processed bucket, and only the objects it creates.
+        - Statement:
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub "${ProcessedBucket.Arn}/*"
+        # It only ever updates the resize attribute of an existing item.
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:UpdateItem
+              Resource: !GetAtt ImageMetadataTable.Arn
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+        External:
+          - "@aws-sdk/*"
+          - "sharp"
+        Format: "cjs"
+        EntryPoints:
+          - src/image-resizer.ts
+
 Outputs:
   ApiUrl:
     Description: "API Gateway HTTP API endpoint URL"
@@ -336,6 +483,12 @@ Outputs:
   AnalyzerDeadLetterQueueUrl:
     Description: "Where analyzer messages land after 3 failed attempts"
     Value: !Ref AnalyzerDeadLetterQueue
+  ProcessedBucketName:
+    Description: "Where the resizer writes the thumb and medium copies"
+    Value: !Ref ProcessedBucket
+  ResizerDeadLetterQueueUrl:
+    Description: "Where resizer messages land after 3 failed attempts"
+    Value: !Ref ResizerDeadLetterQueue
   UserPoolId:
     Description: "Cognito User Pool ID for authentication"
     Value: !Ref AuthCognitoUserPool
