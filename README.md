@@ -25,17 +25,13 @@ Below is the overall overview of the project architecture. We will explain each 
   - [8. Failures, alarms and logs](#8-failures-alarms-and-logs)
   - [Key decisions](#key-decisions)
 - [The item in DynamoDB](#the-item-in-dynamodb)
-- [The upload API](#the-upload-api)
-- [Get a token and upload an image](#get-a-token-and-upload-an-image)
-- [Calling the API with curl](#calling-the-api-with-curl)
-- [Prerequisites](#prerequisites)
+- [API reference](#api-reference)
 - [Getting Started](#getting-started)
 - [Tests](#tests)
 - [Local Development](#local-development)
 - [Cost](#cost)
 - [Next ideas](#next-ideas)
 - [Clean Up](#clean-up)
-- [History](#history)
 
 ## Architecture
 
@@ -110,7 +106,7 @@ const uploadUrl = await getSignedUrl(s3Client, command, {
 
 - Keys have the form `uploads/{userId}/{uuid}.{ext}`, so two users uploading `photo.jpg` never overwrite each other.
 - A bad body, type, extension or size is a `400` that says which check failed, never a `500`. The checks run before anything is signed.
-- The URL expires after 5 minutes. The full request and response contract is in [The upload API](#the-upload-api).
+- The URL expires after 5 minutes. The full request and response contract is in the [API reference](#api-reference).
 
 ### 3. The dispatcher
 
@@ -400,27 +396,112 @@ Each consumer owns one attribute and writes nothing else, so consumers never ove
 
 A transient failure (S3, DynamoDB, throttling) is not recorded. The message is retried, and after 3 attempts it lands in the DLQ.
 
-## The upload API
+## API reference
 
-`POST /upload` with `Authorization: Bearer <JWT>`:
+Darkroom has one HTTP route, behind API Gateway. The upload itself goes straight to S3 with the URL that route returns, and the token comes from Cognito. All three calls are listed here, in the order a client makes them. Base URL: the `ApiUrl` stack output.
+
+| # | Call | Method and path | Auth | Request | Success |
+| - | ---- | --------------- | ---- | ------- | ------- |
+| 1 | Get a token | Cognito `InitiateAuth` (`USER_PASSWORD_AUTH`), with the stack's `UserPoolClientId` | Username and password | `USERNAME`, `PASSWORD` | `AuthenticationResult.IdToken` (valid for an hour) |
+| 2 | Get an upload URL | `POST /upload` | `Authorization: Bearer <IdToken>` | JSON body (below) | `200` with `uploadUrl`, `key`, `message` |
+| 3 | Upload the image | `PUT <uploadUrl>` (S3, not API Gateway) | The signature in the URL | The raw image bytes | `200`, empty body |
+
+### `POST /upload`
+
+Request headers:
+
+| Header | Value |
+| ------ | ----- |
+| `Authorization` | `Bearer <IdToken>` |
+| `Content-Type` | `application/json` |
+
+Request body:
+
+| Field | Type | Required | Rule |
+| ----- | ---- | -------- | ---- |
+| `filename` | string | yes | Not empty. The extension must match `contentType` (`jpg` or `jpeg` for JPEG, `png` for PNG). Only validated, never used in the key |
+| `contentType` | string | yes | `image/jpeg` or `image/png` (the types Rekognition reads) |
+| `size` | integer | yes | The file size in bytes, from 1 to 10485760 (10 MB) |
 
 ```json
 { "filename": "photo.jpg", "contentType": "image/jpeg", "size": 123456 }
 ```
 
-- Only `image/jpeg` and `image/png` up to 10 MB are accepted, and the extension of `filename` must match the type.
-- The server chooses the key, `uploads/{userId}/{uuid}.{ext}`, from the JWT's `sub`. The filename is only validated, never used, so users can't overwrite each other.
-- The URL signs both `Content-Type` and `Content-Length`, so S3 rejects an upload that differs from what was declared. It expires after 5 minutes.
+Responses:
 
-| Status | When                                                           |
-| ------ | -------------------------------------------------------------- |
-| `200`  | `{ "uploadUrl", "key", "message" }`                            |
-| `400`  | Invalid body, type, extension or size (the message says which) |
-| `401`  | No valid token                                                 |
+| Status | When | Body |
+| ------ | ---- | ---- |
+| `200` | The request is valid | `{ "uploadUrl", "key", "message" }` |
+| `400` | The body is not valid JSON or not an object, `filename` is missing or its extension does not match, `contentType` is not allowed, or `size` is out of range | `{ "message": "..." }`, naming the check that failed |
+| `401` | No valid token (API Gateway), or the token has no `sub` claim (the function) | `{ "message": "..." }` |
+| `500` | The URL could not be signed | `{ "message": "Could not generate upload URL" }` |
 
-## Get a token and upload an image
+A `200` looks like this:
 
-This is the manual version of `scripts/try-it.sh` (see [Calling the API with curl](#calling-the-api-with-curl)). It needs the AWS CLI, `curl` and `jq`, and creates a user directly in the pool, which is fine for development.
+```json
+{
+  "uploadUrl": "https://<bucket>.s3.amazonaws.com/uploads/<sub>/<uuid>.jpg?X-Amz-...",
+  "key": "uploads/<sub>/<uuid>.jpg",
+  "message": "Use a PUT request with the same Content-Type and body size to upload your file to the uploadUrl"
+}
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `uploadUrl` | A presigned `PUT` URL. It expires after 5 minutes |
+| `key` | The S3 key the server chose, `uploads/{sub}/{uuid}.{ext}`. It is also the `id` of the item in DynamoDB |
+
+### `PUT <uploadUrl>`
+
+| Header | Value |
+| ------ | ----- |
+| `Content-Type` | Exactly the `contentType` you declared |
+| `Content-Length` | Exactly the `size` you declared (set by the client from the body) |
+
+| Status | When |
+| ------ | ---- |
+| `200` | The upload succeeded. The pipeline starts from this upload, so there is no further call to make |
+| `403` | The `Content-Type` or length differs from what was signed, or the URL has expired |
+
+There is no read endpoint yet. Check the result in the DynamoDB item and the processed bucket (see [The item in DynamoDB](#the-item-in-dynamodb) and [Getting Started](#getting-started)).
+
+CORS allows `POST`, `GET` and `OPTIONS` with the `Authorization` and `Content-Type` headers on the API, and `GET`, `PUT`, `POST` and `HEAD` on the upload bucket.
+
+## Getting Started
+
+You need the AWS CLI with credentials that can create the stack, the SAM CLI and Node.js 20 or later. Docker is not needed. Click a step to expand it.
+
+<details>
+<summary><b>1. Build and deploy</b></summary>
+
+```bash
+cd functions && npm install && cd ..
+sam validate --lint
+sam build
+sam deploy            # settings come from samconfig.toml; add --guided to review them
+```
+
+The first deploy creates the stack `darkroom` in `us-east-1`. Bucket, topic and queue names are generated, so a second stack under another name doesn't collide. The stack outputs the API URL, the Cognito pool and client IDs, both bucket names, the table name and both DLQ URLs.
+
+</details>
+
+<details>
+<summary><b>2. Try it with the script</b></summary>
+
+The script signs in (creating a demo user on the first run), uploads the image, waits for both consumers, prints the result and checks the failure cases:
+
+```bash
+DARKROOM_PASSWORD='YOUR-PASSWORD' scripts/try-it.sh path/to/photo.jpg
+```
+
+It needs `curl` and `jq`, and prompts for the password if the variable isn't set. Pass `--no-failure-cases` to skip the rejection checks, and see `--help` for `STACK`, `AWS_REGION` and `DARKROOM_USER`.
+
+</details>
+
+<details>
+<summary><b>3. Try it by hand with curl</b></summary>
+
+Read the stack outputs into variables:
 
 ```bash
 STACK=darkroom; REGION=us-east-1
@@ -431,7 +512,7 @@ API=$(out ApiUrl); CLIENT_ID=$(out UserPoolClientId); POOL_ID=$(out UserPoolId)
 PROCESSED=$(out ProcessedBucketName); TABLE=$(out TableName)
 ```
 
-Create a user and sign in. Use a password that meets the pool's policy (Cognito's defaults also require mixed case, a number and a symbol).
+Create a user and sign in. The password must meet the pool's policy (at least 8 characters, and Cognito's defaults also require mixed case, a number and a symbol). The token expires after an hour.
 
 ```bash
 aws cognito-idp admin-create-user --region $REGION --user-pool-id $POOL_ID \
@@ -456,68 +537,17 @@ RESP=$(curl -s -X POST "$API/upload" \
   -d "{\"filename\":\"$FILE\",\"contentType\":\"image/jpeg\",\"size\":$SIZE}")
 UPLOAD_URL=$(echo "$RESP" | jq -r .uploadUrl); KEY=$(echo "$RESP" | jq -r .key)
 
-curl -X PUT "$UPLOAD_URL" -H "Content-Type: image/jpeg" --data-binary @"$FILE"
-```
-
-A few seconds later the item is complete and the copies exist:
-
-```bash
-aws dynamodb get-item --region $REGION --table-name $TABLE --key "{\"id\":{\"S\":\"$KEY\"}}"
-aws s3 ls "s3://$PROCESSED/" --recursive
-```
-
-## Calling the API with curl
-
-<details>
-<summary>Every call and failure case, one at a time (click to expand)</summary>
-
-To run all of this in one go, use the script. It signs in (creating the demo user on the first run), uploads the image, waits for both consumers, prints the result and checks the failure cases below:
-
-```bash
-DARKROOM_PASSWORD='YOUR-PASSWORD' scripts/try-it.sh path/to/photo.jpg
-```
-
-It needs the AWS CLI, `curl` and `jq`, and prompts for the password if the variable isn't set. Pass `--no-failure-cases` to skip the rejection checks, and see `--help` for `STACK`, `AWS_REGION` and `DARKROOM_USER`.
-
-What follows is the same thing one call at a time. There is one HTTP endpoint, `POST /upload`. The upload itself goes straight to S3 with the URL it returns, so API Gateway and Lambda never handle the image bytes. The commands reuse `API`, `TOKEN` and `FILE` from the walkthrough above.
-
-**1. Ask for an upload URL**
-
-```bash
-SIZE=$(wc -c < "$FILE" | tr -d ' ')
-
-curl -i -X POST "$API/upload" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{\"filename\":\"$FILE\",\"contentType\":\"image/jpeg\",\"size\":$SIZE}"
-```
-
-`200` returns the URL to upload to and the key the server chose:
-
-```json
-{ "uploadUrl": "https://...s3.amazonaws.com/uploads/<sub>/<uuid>.jpg?X-Amz-...", "key": "uploads/<sub>/<uuid>.jpg", "message": "..." }
-```
-
-**2. Upload the file to S3**
-
-Send exactly the content type and size you declared. Both are signed into the URL.
-
-```bash
 curl -i -X PUT "$UPLOAD_URL" -H "Content-Type: image/jpeg" --data-binary @"$FILE"
 ```
 
-S3 answers `200` with an empty body. The pipeline starts from this upload, so there is no further call to make.
-
-**3. Check the result**
-
-There is no read endpoint yet, so look at the item and the copies directly:
+There is no read endpoint yet, so a few seconds later look at the item and the copies directly:
 
 ```bash
 aws dynamodb get-item --region $REGION --table-name $TABLE --key "{\"id\":{\"S\":\"$KEY\"}}"
 aws s3 ls "s3://$PROCESSED/" --recursive
 ```
 
-**Failure cases**
+**Failure cases** (see the [API reference](#api-reference) for the responses):
 
 ```bash
 # 401: no token (the authorizer answers before the Lambda runs)
@@ -540,43 +570,14 @@ curl -i -X POST "$API/upload" -H "Authorization: Bearer $TOKEN" -H "Content-Type
 curl -i -X PUT "$UPLOAD_URL" -H "Content-Type: image/png" --data-binary @"$FILE"
 ```
 
-The `400` body is `{ "message": "..." }` and says which check failed. The token expires after an hour: if you start getting `401`, run the `initiate-auth` command again.
-
 </details>
-
-## Prerequisites
-
-- AWS CLI with credentials that can create the stack's resources (Lambda, IAM roles, S3, SQS, SNS, DynamoDB, Cognito, API Gateway, CloudWatch).
-- SAM CLI.
-- Node.js 20 or later (the functions run on `nodejs20.x`). esbuild is a project dependency, so nothing needs to be installed globally.
-- Docker is not needed to build or deploy. `sharp` is installed for Linux arm64 by the layer's `.npmrc`, even on a Mac. Docker is only needed for `sam local invoke`.
-
-## Getting Started
-
-### 1. Install, build and deploy
-
-```bash
-cd functions && npm install && cd ..
-sam validate --lint
-sam build
-sam deploy            # settings come from samconfig.toml; add --guided to review them
-```
-
-The first deploy creates the stack `darkroom` in `us-east-1`. Bucket, topic and queue names are generated, so a second stack under another name doesn't collide. The stack outputs the API URL, the Cognito pool and client IDs, both bucket names, the table name and both DLQ URLs (read them as in the walkthrough above).
-
-### 2. Try it
-
-Run the script with any JPEG or PNG. It signs in, uploads the image, waits for both consumers and prints the result:
-
-```bash
-DARKROOM_PASSWORD='YOUR-PASSWORD' scripts/try-it.sh path/to/photo.jpg
-```
-
-To do the same by hand, follow [Get a token and upload an image](#get-a-token-and-upload-an-image), or see [Calling the API with curl](#calling-the-api-with-curl). The live tests below check the deployed stack more thoroughly.
 
 ## Tests
 
-Unit tests use mocked AWS clients (the resizer tests run real `sharp`) and need nothing deployed:
+<details>
+<summary><b>Unit tests</b>: mocked AWS clients, nothing deployed</summary>
+
+The resizer tests run real `sharp`.
 
 ```bash
 cd functions
@@ -586,7 +587,12 @@ npm run format       # format src/ and tests/ with Prettier
 npm run format:check # the same check without writing
 ```
 
-Live tests run against the **deployed** stack with your AWS credentials. Most of this project is events and queues rather than HTTP, so the live tests assert on S3, DynamoDB, SQS and CloudWatch directly. They look every resource up from the stack (`STACK_NAME`, default `darkroom`) and clean up after themselves.
+</details>
+
+<details>
+<summary><b>Live tests</b>: against the deployed stack</summary>
+
+Most of this project is events and queues rather than HTTP, so the live tests assert on S3, DynamoDB, SQS and CloudWatch directly. They look every resource up from the stack (`STACK_NAME`, default `darkroom`) and clean up after themselves.
 
 ```bash
 cd functions
@@ -596,7 +602,12 @@ npm run test:live:dlq   # about 25 minutes: a poison message reaches each consum
 
 They call the upload Lambda directly with a synthetic identity instead of signing in, so no Cognito user is needed. Set `LIVE_TEST_IMAGE=/path/to/photo.jpg` to use your own photo and get real labels. Each run costs a few cents at most.
 
+</details>
+
 ## Local Development
+
+<details>
+<summary><b>Run the pipeline from your machine</b></summary>
 
 The quickest loop is the unit tests, then dropping a real image into the upload bucket and watching the pipeline run:
 
@@ -612,6 +623,8 @@ cp env.example.json env.json        # fill in TABLE_NAME and TOPIC_ARN from your
 sam local invoke ImageDispatcherFunction -e events/s3-event.json --env-vars env.json
 ```
 
+</details>
+
 ## Cost
 
 Everything is pay-per-use, so an idle stack costs almost nothing. The fixed costs are S3 storage and two CloudWatch alarms. Each upload costs one Rekognition call, three Lambda invocations (plus one for the upload URL) and a few cents' worth of requests at most. Check current prices before relying on this.
@@ -626,15 +639,17 @@ Everything is pay-per-use, so an idle stack costs almost nothing. The fixed cost
 
 ## Clean Up
 
-To remove everything this project created:
+<details>
+<summary><b>Remove everything this project created</b></summary>
 
-1. Empty both buckets (S3 won't delete a bucket that has objects):
-   ```bash
-   aws s3 rm "s3://UPLOAD_BUCKET" --recursive
-   aws s3 rm "s3://PROCESSED_BUCKET" --recursive
-   ```
-2. Delete the stack: `sam delete --stack-name darkroom`
+Empty both buckets first, because S3 won't delete a bucket that has objects, then delete the stack:
 
-## History
+```bash
+aws s3 rm "s3://UPLOAD_BUCKET" --recursive
+aws s3 rm "s3://PROCESSED_BUCKET" --recursive
+sam delete --stack-name darkroom
+```
 
-Darkroom grew in versions, each with its own diagram in [images/](images/): V1 to V3 (S3 trigger to DynamoDB, API, first AI step), V4 (SNS fan-out), V5 (Cognito), then V6 (this version: queues and DLQs, safe uploads, tests, and the resizer).
+Both bucket names are stack outputs (`BucketName` and `ProcessedBucketName`).
+
+</details>
