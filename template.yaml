@@ -65,13 +65,17 @@ Resources:
   UploadBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub "${AWS::StackName}-upload-bucket"
       CorsConfiguration:
         CorsRules:
           - AllowedHeaders: ["*"]
             AllowedMethods: [GET, PUT, POST, HEAD]
             AllowedOrigins: ['*']
             MaxAge: 3000
+
+  GetUploadUrlLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 14
 
   GetUploadUrlFunction:
     Type: AWS::Serverless::Function
@@ -80,6 +84,8 @@ Resources:
       Handler: get-upload-url.handler
       Runtime: nodejs20.x
       Architectures: [arm64]
+      LoggingConfig:
+        LogGroup: !Ref GetUploadUrlLogGroup
       Environment:
         Variables:
           UPLOAD_BUCKET: !Ref UploadBucket
@@ -106,22 +112,72 @@ Resources:
 
   ImageEventsTopic:
     Type: AWS::SNS::Topic
-    Properties:
-      TopicName: ImageUploadEvents
 
-  ImageEventsTopicPolicy:
-    Type: AWS::SNS::TopicPolicy
+  # Fan-out: every consumer gets its own queue (with its own DLQ) subscribed to the topic.
+  # A new consumer is a new queue, a subscription and a function; nothing here changes.
+  AnalyzerDeadLetterQueue:
+    Type: AWS::SQS::Queue
     Properties:
-      Topics:
-        - !Ref ImageEventsTopic
+      MessageRetentionPeriod: 1209600 # 14 days, the maximum
+
+  AnalyzerQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      # 6x the analyzer's timeout (30 s), so a message isn't handed to a second invocation
+      # while the first may still be working on it.
+      VisibilityTimeout: 180
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt AnalyzerDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  AnalyzerQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref AnalyzerQueue
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
-              Service: s3.amazonaws.com
-            Action: sns:Publish
-            Resource: !Ref ImageEventsTopic
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt AnalyzerQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref ImageEventsTopic
+
+  AnalyzerSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref ImageEventsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt AnalyzerQueue.Arn
+      RawMessageDelivery: true
+      FilterPolicy:
+        eventType:
+          - ObjectCreated
+
+  AnalyzerDeadLetterQueueAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: A message gave up in the analyzer queue and is waiting in its DLQ
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt AnalyzerDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  ImageDispatcherLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 14
 
   ImageDispatcherFunction:
     Type: AWS::Serverless::Function
@@ -133,15 +189,20 @@ Resources:
         - arm64
       MemorySize: 256
       Timeout: 30
+      LoggingConfig:
+        LogGroup: !Ref ImageDispatcherLogGroup
       Environment:
         Variables:
           TABLE_NAME: !Ref ImageMetadataTable
           TOPIC_ARN: !Ref ImageEventsTopic
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref ImageMetadataTable
-        - S3ReadPolicy:
-            BucketName: !Sub "${AWS::StackName}-upload-bucket"
+        # It writes the item, reads it back on a duplicate event, and publishes. It never reads S3.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+              Resource: !GetAtt ImageMetadataTable.Arn
         - SNSPublishMessagePolicy:
             TopicName: !GetAtt ImageEventsTopic.TopicName
       Events:
@@ -166,6 +227,11 @@ Resources:
         EntryPoints:
           - image-dispatcher.ts
 
+  ImageAnalyzerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 14
+
   ImageAnalyzerFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -176,20 +242,30 @@ Resources:
         - arm64
       MemorySize: 256
       Timeout: 30
+      LoggingConfig:
+        LogGroup: !Ref ImageAnalyzerLogGroup
       Environment:
         Variables:
           TABLE_NAME: !Ref ImageMetadataTable
       Events:
-        TopicEvent:
-          Type: SNS
+        AnalyzerQueueEvent:
+          Type: SQS
           Properties:
-            Topic: !Ref ImageEventsTopic
+            Queue: !GetAtt AnalyzerQueue.Arn
+            BatchSize: 5
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            ScalingConfig:
+              MaximumConcurrency: 5
       Policies:
         - RekognitionDetectOnlyPolicy: {}
         - S3ReadPolicy:
             BucketName: !Ref UploadBucket
-        - DynamoDBCrudPolicy:
-            TableName: !Ref ImageMetadataTable
+        # It only ever updates the analysis attribute of an existing item.
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:UpdateItem
+              Resource: !GetAtt ImageMetadataTable.Arn
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -211,6 +287,9 @@ Outputs:
   TableName:
     Description: "DynamoDB table name"
     Value: !Ref ImageMetadataTable
+  AnalyzerDeadLetterQueueUrl:
+    Description: "Where analyzer messages land after 3 failed attempts"
+    Value: !Ref AnalyzerDeadLetterQueue
   UserPoolId:
     Description: "Cognito User Pool ID for authentication"
     Value: !Ref AuthCognitoUserPool

@@ -15,7 +15,7 @@ Out of scope: frontend, Bedrock or other new AI features, Step Functions, Powert
 | 0 | Baseline and a working test setup | Done | `step-0-complete` | Free |
 | 1 | Failures stop being silent | Done | `step-1-complete` | Free |
 | 2 | Safe uploads and unique keys | Done | `step-2-complete` | Free |
-| 3 | Queues between SNS and the consumers | Not started | `step-3-complete` | Free |
+| 3 | Queues between SNS and the consumers | Built and tested, not deployed | `step-3-complete` | Free |
 | 4 | Image resizer | Not started | `step-4-complete` | S3 storage only, cents |
 | 5 | Docs and cleanup | Not started | `v6-complete` | Free |
 
@@ -176,11 +176,14 @@ The analyzer hangs directly off SNS, so a bad message is retried a few times by 
 Subscribe an SQS queue (with a DLQ) to the topic and move the analyzer onto it, reporting partial batch failures. Remove the unused topic policy and the hardcoded names. Add log retention and an alarm on each DLQ. Turn `disable_rollback` off.
 
 **Exit:**
-- [ ] Analyzer reads from its queue and handles a batch with one bad record: the others are processed once, the bad one is retried and then lands in the DLQ (SC-1).
-- [ ] The DLQ alarm is forced into `ALARM` once and fires.
-- [ ] `ImageEventsTopicPolicy` is gone; no `BucketName` or `TopicName` in the template (SC-8).
-- [ ] A second stack deploys without name collisions, or a rename is proven by an in-place update after emptying the bucket.
-- [ ] The full flow (upload → item → labels) works end to end after the change.
+- [ ] Analyzer reads from its queue and handles a batch with one bad record: the others are processed once, the bad one is retried and then lands in the DLQ (SC-1). *(the batch behavior is unit-tested: 3 records, 1 malformed, the other 2 updated once each; the retry and the DLQ need the deploy)*
+- [ ] The DLQ alarm is forced into `ALARM` once and fires. *(the alarm is defined; the check needs the deploy)*
+- [x] `ImageEventsTopicPolicy` is gone; no `BucketName` or `TopicName` in the template (SC-8). *(the queue policy that replaces it only lets this topic send to this queue)*
+- [ ] A second stack deploys without name collisions, or a rename is proven by an in-place update after emptying the bucket. *(needs the deploy)*
+- [ ] The full flow (upload → item → labels) works end to end after the change. *(needs the deploy)*
+- [ ] `disable_rollback` is turned off once the first deploy is stable.
+
+*Notes: beyond the plan, the dispatcher's IAM is narrowed to `PutItem` and `GetItem` and its S3 read policy is removed, because it never reads S3 (that also removes the stack-name workaround the old policy needed to avoid a circular dependency). The analyzer's table access is `UpdateItem` only. Log groups come from `LoggingConfig` with 14-day retention. The subscription uses raw delivery plus a filter policy on `eventType`. The DLQ alarm has no notification action yet, so it only changes state; an email or chat target is a later addition. The first deploy also decides the open question about `@aws-sdk/*` being external.*
 
 *Free. Redeploying replaces the bucket and the topic, so use `sam delete` and a fresh deploy, or empty the old bucket first (§6).*
 
@@ -233,8 +236,8 @@ Validate and test locally → deploy → verify the exit criteria by hand with a
 | Question | Recommendation | Decision |
 |---|---|---|
 | Resizer library (Step 4) | `sharp`, after a build spike on arm64; `jimp` if the native binary becomes a time sink | Open |
-| SNS → SQS now, or SNS → Lambda direct with rethrown errors only (Step 3) | SNS → SQS: it's what makes the retry, DLQ and alarm fixes real, and the resizer needs its own queue anyway | Open |
-| Fresh deploy or in-place update (Step 3) | `sam delete` and a fresh deploy: removing the names replaces the bucket and topic, and the data is disposable | Open |
+| SNS → SQS now, or SNS → Lambda direct with rethrown errors only (Step 3) | SNS → SQS: it's what makes the retry, DLQ and alarm fixes real, and the resizer needs its own queue anyway | SNS → SQS, done in Step 3 |
+| Fresh deploy or in-place update (Step 3) | `sam delete` and a fresh deploy: removing the names replaces the bucket and topic, and the data is disposable | Fresh deploy, when the stack is deployed |
 | A read endpoint (`GET /images/{id}` with presigned GET URLs for the variants) | Not in V6. Without it, results are checked in the S3 console and DynamoDB; add it in V7 | Open |
 
 *Costs are approximate `us-east-1` list prices. Confirm them before relying on them.*
